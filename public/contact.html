@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contact — CasaBatangueño</title>
+<meta name="description" content="Contact CasaBatangueño in Alangilan, Batangas City for room viewings, rental inquiries, and location map.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/css/style.css"><link rel="stylesheet" href="/css/public.css">
+</head>
+<body>
+<div id="site-header"></div>
+
+<section class="page-head"><div class="container">
+  <h1>Contact Us</h1>
+  <p>Questions about room availability, ocular visits, or group dorm bookings? Reach our Alangilan team directly.</p>
+</div></section>
+
+<section class="section"><div class="container">
+  <div class="contact-grid">
+    <div class="panel-card">
+      <h2>Alangilan Management Office</h2>
+      <p class="muted">Drop by during office hours or send us a message using the form.</p>
+      <ul class="contact-list">
+        <li><b>Phone:</b> <a href="tel:+639175550101">+63 917 555 0101</a></li>
+        <li><b>Email:</b> <a href="mailto:owner@casa-bat.com">owner@casa-bat.com</a></li>
+        <li><b>Address:</b> Neptune St. (near Alfamart), Golden Country Homes, Brgy. Alangilan, Batangas City</li>
+        <li><b>Office Hours:</b> Monday – Saturday, 8:00 AM – 6:00 PM (Sundays by appointment)</li>
+      </ul>
+      <div id="contactMap" class="contact-map" aria-label="Alangilan office and property map"></div>
+    </div>
+
+    <div class="panel-card">
+      <h2>Send a Message</h2>
+      <p class="muted">Need to schedule a viewing or ask about specific rooms? Leave your details below.</p>
+      <div id="contactFeedback" style="margin-bottom:12px"></div>
+      <form id="contactForm">
+        <div class="grid2">
+          <div class="field"><label>Full name *</label><input name="fullName" required maxlength="100"></div>
+          <div class="field"><label>Email *</label><input name="email" type="email" required maxlength="150"></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Phone number</label><input name="phone" maxlength="40" placeholder="+63 9XX XXX XXXX"></div>
+          <div class="field"><label>Subject</label><input name="subject" maxlength="120" placeholder="Room viewing, availability, rates…"></div>
+        </div>
+        <div class="field"><label>Message * (at least 10 characters)</label><textarea name="message" rows="5" minlength="10" maxlength="1000" required placeholder="Tell us which property or room type you are interested in and your preferred viewing schedule."></textarea></div>
+        <button class="btn" type="submit">Send message</button>
+      </form>
+    </div>
+  </div>
+</div></section>
+
+<div id="site-footer"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/layout.js"></script>
+<script src="/js/contact.js"></script>
+</body></html>

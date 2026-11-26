@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CasaBatangueño — Apartment & Dormitory Rentals in Alangilan, Batangas City</title>
+<meta name="description" content="Browse verified apartments and dormitories in Alangilan, Batangas City, read tenant reviews, view locations on a map, and apply online.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/css/style.css"><link rel="stylesheet" href="/css/public.css">
+</head>
+<body>
+<div id="site-header"></div>
+
+<section class="hero"><div class="container">
+  <h1>Find an apartment or dorm in Alangilan that feels like home.</h1>
+  <p>Verified dormitories, apartments, and private rooms across Alangilan, Batangas City—complete with transparent policies, real tenant reviews, and instant online applications.</p>
+  <form class="search hero-search" id="quickSearch" autocomplete="off">
+    <div class="field"><label for="hq">Location or property name</label><input id="hq" name="q" placeholder="Golden Country Homes, Neptune St., Highway…"></div>
+    <div class="field"><label for="htype">Rental type</label><select id="htype" name="type"><option value="">Any type</option>
+      <option>Apartment</option><option>Dormitory</option><option>Boarding House</option><option>Studio Unit</option><option>Shared Room</option><option>Private Room</option></select></div>
+    <button type="submit" class="btn">Search rentals</button>
+  </form>
+  <div class="hero-actions">
+    <a class="btn" href="/rentals.html">Browse all rentals</a>
+    <a class="hero-link" href="/how-it-works.html">How it works →</a>
+  </div>
+</div></section>
+
+<section class="section alt"><div class="container">
+  <h2>Built for students, professionals, and Alangilan residents</h2>
+  <p class="sub">Every listing is directly managed in Alangilan, Batangas City—no hidden broker fees or guesswork.</p>
+  <div class="highlights">
+    <div class="highlight"><h3>Convenient Alangilan Access</h3><p class="muted">Minutes on foot to Jose P. Laurel National Highway, Alfamart, local eateries, and jeepney routes.</p></div>
+    <div class="highlight"><h3>Transparent Terms</h3><p class="muted">Clear deposit rules, sub-metered utility breakdowns, inclusions, and house policies upfront.</p></div>
+    <div class="highlight"><h3>Digital Receipts & Support</h3><p class="muted">Pay via Cash, GCash, Maya, or Bank Transfer and get verified official receipts every billing cycle.</p></div>
+  </div>
+</div></section>
+
+<section class="section"><div class="container">
+  <div class="section-head">
+    <div><h2 style="margin-bottom:4px">Featured rentals</h2><p class="sub" style="margin:0">Top-rated listings with ready-to-move-in rooms and beds.</p></div>
+    <a class="btn ghost" href="/rentals.html">View all rentals →</a>
+  </div>
+  <div class="cards" id="featuredCards"><div class="empty">Loading featured properties…</div></div>
+</div></section>
+
+<section class="section alt"><div class="container">
+  <div class="section-head">
+    <div><h2 style="margin-bottom:4px">How it works</h2><p class="sub" style="margin:0">From online inquiry to move-in day in three clear phases.</p></div>
+    <a class="btn ghost" href="/how-it-works.html">Read full guide →</a>
+  </div>
+  <div class="steps">
+    <div class="step"><b>1</b><h3>Search & Compare</h3><p class="muted">Filter by budget, room type, beds needed, and location in Alangilan, Batangas City.</p></div>
+    <div class="step"><b>2</b><h3>Apply & Reserve</h3><p class="muted">Submit your online application, get an instant reference number, and lock in your assigned room.</p></div>
+    <div class="step"><b>3</b><h3>Sign & Move In</h3><p class="muted">Settle your contract, advance, and deposit, receive your keys, and track monthly receipts.</p></div>
+  </div>
+</div></section>
+
+<section class="section"><div class="container">
+  <div class="section-head">
+    <div><h2 style="margin-bottom:4px">Latest resident reviews</h2><p class="sub" style="margin:0">Verified feedback moderated and published from current and former tenants.</p></div>
+    <a class="btn ghost" href="/rentals.html">Leave a review on a property →</a>
+  </div>
+  <div class="review-cards" id="latestReviews"><div class="empty">Loading reviews…</div></div>
+</div></section>
+
+<div id="site-footer"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/layout.js"></script>
+<script src="/js/properties.js"></script>
+<script src="/js/home.js"></script>
+</body></html>

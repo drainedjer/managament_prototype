@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Find a Rental — CasaBatangueño</title>
+<meta name="description" content="Search and filter verified apartments, dormitories, and private rooms in Alangilan, Batangas City on an interactive map.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/css/style.css"><link rel="stylesheet" href="/css/public.css">
+</head>
+<body>
+<div id="site-header"></div>
+
+<section class="page-head"><div class="container">
+  <h1>Find a Rental in Alangilan</h1>
+  <p>Filter by property type, monthly budget, available beds, and amenities—then explore each listing on the map.</p>
+</div></section>
+
+<section class="section"><div class="container">
+  <div class="filters-bar">
+    <form class="search" id="filters" autocomplete="off">
+      <div class="field"><label for="q">Location or name</label><input id="q" name="q" placeholder="Alangilan, Batangas City"></div>
+      <div class="field"><label for="type">Type</label><select id="type" name="type"><option value="">Any type</option>
+        <option>Apartment</option><option>Dormitory</option><option>Boarding House</option><option>Studio Unit</option><option>Shared Room</option><option>Private Room</option></select></div>
+      <div class="field"><label for="minPrice">Min ₱</label><input id="minPrice" name="minPrice" type="number" min="0" step="500"></div>
+      <div class="field"><label for="maxPrice">Max ₱</label><input id="maxPrice" name="maxPrice" type="number" min="0" step="500"></div>
+      <div class="field"><label for="occupants">Occupants</label><input id="occupants" name="occupants" type="number" min="1" max="10"></div>
+      <button type="button" class="btn ghost" id="reset">Reset</button>
+    </form>
+    <div class="checks">
+      <label style="margin:0"><input type="checkbox" id="onlyAvailable" form="filters"> Only with available rooms</label>
+      <select id="amenity" form="filters" style="max-width:260px"><option value="">Any amenity</option></select>
+    </div>
+  </div>
+
+  <h2>Available rentals</h2>
+  <p class="sub" id="count">Loading…</p>
+  <div class="layout">
+    <div class="cards" id="cards"></div>
+    <div id="map" aria-label="Property map"></div>
+  </div>
+</div></section>
+
+<div id="site-footer"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/js/common.js"></script>
+<script src="/js/layout.js"></script>
+<script src="/js/properties.js"></script>
+<script src="/js/rentals.js"></script>
+</body></html>

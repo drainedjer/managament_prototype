@@ -1,0 +1,18 @@
+{
+  "name": "CasaBatangueño",
+  "version": "1.0.0",
+  "description": "CasaBatangueño - Apartment & Dormitory Rental Management System (HTML, CSS, vanilla JS, Node.js, Express)",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js",
+    "build": "node --check server/server.js && node --check server/app.js && node --check server/db.js",
+    "lint": "node --check server/server.js && node --check server/app.js && node --check server/db.js && node --check public/js/common.js && node --check public/js/layout.js && node --check public/js/properties.js && node --check public/js/home.js && node --check public/js/rentals.js && node --check public/js/about.js && node --check public/js/contact.js && node --check public/js/owner.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
