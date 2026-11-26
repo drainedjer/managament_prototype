@@ -90,7 +90,13 @@ app.use(
 
 function getAllowedOrigins() {
   const set = new Set(['http://localhost:3000', 'http://127.0.0.1:3000']);
-  if (process.env.VERCEL_URL) set.add(`https://${process.env.VERCEL_URL}`);
+  [
+    process.env.VERCEL_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+  ]
+    .filter(Boolean)
+    .forEach((h) => set.add(`https://${h.replace(/^https?:\/\//, '').replace(/\/$/, '')}`));
   if (process.env.APP_URL) set.add(process.env.APP_URL.replace(/\/$/, ''));
   (process.env.ALLOWED_ORIGINS || '')
     .split(',')
@@ -100,15 +106,33 @@ function getAllowedOrigins() {
   return set;
 }
 
+function getRequestHosts(req) {
+  const hosts = new Set();
+  for (const h of [req.get('host'), req.get('x-forwarded-host')]) {
+    if (!h) continue;
+    String(h)
+      .split(',')
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((x) => hosts.add(x));
+  }
+  return hosts;
+}
+
 app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      const allowed = getAllowedOrigins();
-      if (allowed.has(origin)) return cb(null, true);
+  cors((req, cb) => {
+    const origin = req.get('origin');
+    if (!origin) return cb(null, { origin: true, credentials: true });
+    if (getAllowedOrigins().has(origin)) return cb(null, { origin: true, credentials: true });
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      if (getRequestHosts(req).has(originHost)) {
+        return cb(null, { origin: true, credentials: true });
+      }
+    } catch {
       return cb(new Error('Origin not allowed by CORS'));
-    },
-    credentials: true,
+    }
+    return cb(new Error('Origin not allowed by CORS'));
   })
 );
 
@@ -182,11 +206,11 @@ function csrfProtect(req, res, next) {
     return res.status(403).json({ error: 'Invalid or missing CSRF token. Please refresh and try again.' });
   }
   const origin = req.get('origin');
-  const host = req.get('host');
-  if (origin && host) {
+  const reqHosts = getRequestHosts(req);
+  if (origin && reqHosts.size) {
     try {
-      const originHost = new URL(origin).host;
-      if (originHost !== host && !getAllowedOrigins().has(origin)) {
+      const originHost = new URL(origin).host.toLowerCase();
+      if (!reqHosts.has(originHost) && !getAllowedOrigins().has(origin)) {
         return res.status(403).json({ error: 'Origin mismatch.' });
       }
     } catch {
