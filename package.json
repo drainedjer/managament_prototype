@@ -1,18 +1,30 @@
 {
-  "name": "CasaBatangueño",
+  "name": "casa-batangueno",
   "version": "1.0.0",
-  "description": "CasaBatangueño - Apartment & Dormitory Rental Management System (HTML, CSS, vanilla JS, Node.js, Express)",
+  "description": "CasaBatangueño - Apartment & Dormitory Rental Management System (HTML, CSS, vanilla JS, Node.js, Express, Neon Postgres)",
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
     "dev": "node --watch server/server.js",
-    "build": "node --check server/server.js && node --check server/app.js && node --check server/db.js",
-    "lint": "node --check server/server.js && node --check server/app.js && node --check server/db.js && node --check public/js/common.js && node --check public/js/layout.js && node --check public/js/properties.js && node --check public/js/home.js && node --check public/js/rentals.js && node --check public/js/about.js && node --check public/js/contact.js && node --check public/js/owner.js"
+    "build": "node --check server/server.js && node --check server/app.js && node --check server/db.js && node --check server/db-pg.js && node --check server/db-mem.js && node --check server/validate.js && node --check server/time.js && node --check server/email.js",
+    "lint": "node --check server/server.js && node --check server/app.js && node --check server/db.js && node --check server/db-pg.js && node --check server/db-mem.js && node --check server/validate.js && node --check server/time.js && node --check server/email.js && node --check public/js/common.js && node --check public/js/layout.js && node --check public/js/properties.js && node --check public/js/home.js && node --check public/js/rentals.js && node --check public/js/how-it-works.js && node --check public/js/contact.js && node --check public/js/about.js && node --check public/js/account.js && node --check public/js/owner.js",
+    "db:init": "node scripts/db-init.js",
+    "db:seed": "node scripts/db-seed.js",
+    "test": "node --test tests/api.test.js"
   },
   "dependencies": {
+    "@vercel/blob": "^2.9.0",
     "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2"
+    "express-rate-limit": "^8.7.5",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.23.1",
+    "resend": "^6.40.0",
+    "supertest": "^7.3.2",
+    "zod": "^4.6.7"
   }
 }

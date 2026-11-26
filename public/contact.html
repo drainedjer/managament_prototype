@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Contact — CasaBatangueño</title>
-<meta name="description" content="Contact CasaBatangueño in Alangilan, Batangas City for room viewings, rental inquiries, and location map.">
+<title>Contact &amp; Book a Viewing — CasaBatangueño</title>
+<meta name="description" content="Contact the CasaBatangueño management office in Alangilan, Batangas City or schedule an ocular viewing of our apartments and dormitories.">
+<meta property="og:title" content="Contact &amp; Book a Viewing — CasaBatangueño">
+<meta property="og:description" content="Message our Alangilan office or book a property viewing schedule online.">
+<meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -13,41 +16,67 @@
 <div id="site-header"></div>
 
 <section class="page-head"><div class="container">
-  <h1>Contact Us</h1>
-  <p>Questions about room availability, ocular visits, or group dorm bookings? Reach our Alangilan team directly.</p>
+  <h1>Contact Us &amp; Book a Viewing</h1>
+  <p>Send an inquiry to our Alangilan management office or reserve an in-person ocular inspection slot.</p>
 </div></section>
 
 <section class="section"><div class="container">
-  <div class="contact-grid">
+  <div class="about-grid">
     <div class="panel-card">
-      <h2>Alangilan Management Office</h2>
-      <p class="muted">Drop by during office hours or send us a message using the form.</p>
-      <ul class="contact-list">
-        <li><b>Phone:</b> <a href="tel:+639175550101">+63 917 555 0101</a></li>
-        <li><b>Email:</b> <a href="mailto:owner@casa-bat.com">owner@casa-bat.com</a></li>
-        <li><b>Address:</b> Neptune St. (near Alfamart), Golden Country Homes, Brgy. Alangilan, Batangas City</li>
-        <li><b>Office Hours:</b> Monday – Saturday, 8:00 AM – 6:00 PM (Sundays by appointment)</li>
-      </ul>
-      <div id="contactMap" class="contact-map" aria-label="Alangilan office and property map"></div>
+      <h2>Send a Message</h2>
+      <p class="muted">Have questions about room availability, lease terms, or utility rates? Message us directly.</p>
+      <form id="contactForm">
+        <div class="hp-field" aria-hidden="true"><label for="cWeb">Website</label><input id="cWeb" name="website" tabindex="-1" autocomplete="off"></div>
+        <div class="grid2">
+          <div class="field"><label for="cName">Full name *</label><input id="cName" name="fullName" required maxlength="100"></div>
+          <div class="field"><label for="cEmail">Email *</label><input id="cEmail" name="email" type="email" required maxlength="150"></div>
+          <div class="field"><label for="cPhone">Phone number</label><input id="cPhone" name="phone" maxlength="40" placeholder="09XX XXX XXXX"></div>
+          <div class="field"><label for="cSubject">Subject</label><input id="cSubject" name="subject" maxlength="120" value="Rental inquiry"></div>
+        </div>
+        <div class="field"><label for="cMsg">Message * (10–1000 chars)</label><textarea id="cMsg" name="message" rows="4" minlength="10" maxlength="1000" required></textarea></div>
+        <label class="consent-row"><input type="checkbox" name="consentAccepted" required> <span>I consent under the <a href="/privacy.html" target="_blank">Privacy Policy (RA 10173)</a> to CasaBatangueño storing my inquiry so the team can reply.</span></label>
+        <button class="btn" type="submit">Send message</button>
+      </form>
+      <div id="contactStatus" style="margin-top:12px"></div>
     </div>
 
     <div class="panel-card">
-      <h2>Send a Message</h2>
-      <p class="muted">Need to schedule a viewing or ask about specific rooms? Leave your details below.</p>
-      <div id="contactFeedback" style="margin-bottom:12px"></div>
-      <form id="contactForm">
-        <div class="grid2">
-          <div class="field"><label>Full name *</label><input name="fullName" required maxlength="100"></div>
-          <div class="field"><label>Email *</label><input name="email" type="email" required maxlength="150"></div>
-        </div>
-        <div class="grid2">
-          <div class="field"><label>Phone number</label><input name="phone" maxlength="40" placeholder="+63 9XX XXX XXXX"></div>
-          <div class="field"><label>Subject</label><input name="subject" maxlength="120" placeholder="Room viewing, availability, rates…"></div>
-        </div>
-        <div class="field"><label>Message * (at least 10 characters)</label><textarea name="message" rows="5" minlength="10" maxlength="1000" required placeholder="Tell us which property or room type you are interested in and your preferred viewing schedule."></textarea></div>
-        <button class="btn" type="submit">Send message</button>
-      </form>
+      <h2>Alangilan Management Office</h2>
+      <ul class="contact-list" id="officeInfo">
+        <li><b>Office:</b> Neptune St., Golden Country Homes, Brgy. Alangilan, Batangas City</li>
+        <li><b>Phone:</b> <a href="tel:+639175550101">+63 917 555 0101</a></li>
+        <li><b>Email:</b> <a href="mailto:owner@casa-bat.com">owner@casa-bat.com</a></li>
+        <li><b>Hours:</b> Mon – Sat, 8:00 AM – 6:00 PM</li>
+      </ul>
+      <div id="contactMap" style="height:250px;border-radius:12px;margin-top:16px" aria-label="Office map"></div>
     </div>
+  </div>
+</div></section>
+
+<section class="section alt" id="viewing"><div class="container">
+  <div class="panel-card" style="max-width:760px;margin:0 auto">
+    <h2>Book an Ocular Viewing</h2>
+    <p class="muted">Want to see the rooms, study lounge, and neighborhood in person? Pick a property and preferred schedule.</p>
+    <form id="viewingForm">
+      <div class="hp-field" aria-hidden="true"><label for="vWeb">Website</label><input id="vWeb" name="website" tabindex="-1" autocomplete="off"></div>
+      <div class="grid2">
+        <div class="field"><label for="viewProperty">Property *</label><select id="viewProperty" name="propertyId" required><option value="">Loading properties…</option></select></div>
+        <div class="field"><label for="vName">Full name *</label><input id="vName" name="fullName" required maxlength="120"></div>
+        <div class="field"><label for="vEmail">Email *</label><input id="vEmail" name="email" type="email" required maxlength="150"></div>
+        <div class="field"><label for="vPhone">Mobile number *</label><input id="vPhone" name="phone" required maxlength="30" placeholder="09XX XXX XXXX"></div>
+        <div class="field"><label for="viewDate">Preferred date *</label><input id="viewDate" name="preferredDate" type="date" required></div>
+        <div class="field"><label for="vTime">Preferred time *</label><select id="vTime" name="preferredTime" required>
+          <option>9:00 AM - 10:00 AM</option>
+          <option>10:30 AM - 11:30 AM</option>
+          <option>2:00 PM - 3:00 PM</option>
+          <option>4:00 PM - 5:00 PM</option>
+        </select></div>
+      </div>
+      <div class="field"><label for="vNotes">Notes (optional)</label><textarea id="vNotes" name="notes" rows="2" maxlength="500" placeholder="Room type you want to inspect or questions"></textarea></div>
+      <label class="consent-row"><input type="checkbox" name="consentAccepted" required> <span>I consent under the <a href="/privacy.html" target="_blank">Privacy Policy (RA 10173)</a> for viewing scheduling.</span></label>
+      <button class="btn" type="submit">Request viewing schedule</button>
+    </form>
+    <div id="viewingStatus" style="margin-top:12px"></div>
   </div>
 </div></section>
 

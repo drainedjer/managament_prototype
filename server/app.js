@@ -1,637 +1,1421 @@
 /**
-  app.js - Express application: REST API + static frontend.
-  Sections: helpers, authorization, public API, dashboard, CRUD modules, reports.
+ * app.js - Express 4 application for CasaBatangueño (Vercel serverless + local dev).
+ * Handles security middleware, httpOnly cookie + CSRF auth, role-based access control,
+ * owner isolation, masked staff views, private ID document access, Resend emails, and Vercel Cron.
  */
-require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
+const { put } = require('@vercel/blob');
+
 const db = require('./db');
+const V = require('./validate');
+const { getDateRange } = require('./time');
+const email = require('./email');
 
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const app = express();
-app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.set('trust proxy', 1);
 
-// ============================== helpers ==============================
-const today = () => new Date().toISOString().slice(0, 10);
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const str = (v) => (typeof v === 'string' ? v.trim() : '');
-const sum = (arr, fn) => arr.reduce((t, x) => t + fn(x), 0);
-const fail = (res, code, msg) => res.status(code).json({ error: msg });
-const asyncSafe = (fn) => (req, res) => {
-  try { fn(req, res); } catch (e) { console.error(e); fail(res, 500, 'Server error.'); }
-};
+const IS_PROD = process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
+const BCRYPT_ROUNDS = 12;
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+const SESSION_COOKIE = 'cb_session';
+const CSRF_COOKIE = 'cb_csrf';
 
-function getRange(q) {
-  const now = new Date();
-  const iso = (d) => d.toISOString().slice(0, 10);
-  if (q.range === 'custom' && q.start && q.end) return { start: q.start, end: q.end };
-  if (q.range === 'today') return { start: today(), end: today() };
-  if (q.range === 'week') {
-    const s = new Date(now); s.setDate(s.getDate() - 6);
-    return { start: iso(s), end: today() };
+// Enforce JWT_SECRET in production/Vercel; use an ephemeral random key in local dev/test if unset.
+let resolvedJwtSecret = process.env.JWT_SECRET || '';
+if (!resolvedJwtSecret) {
+  if (IS_PROD || process.env.ENFORCE_JWT_SECRET === 'true') {
+    throw new Error('JWT_SECRET environment variable is required in production/Vercel.');
   }
-  if (q.range === 'month') {
-    const ym = today().slice(0, 7);
-    return { start: `${ym}-01`, end: `${ym}-31` };
-  }
-  if (q.range === 'year') return { start: `${now.getFullYear()}-01-01`, end: `${now.getFullYear()}-12-31` };
-  return { start: '2000-01-01', end: '2099-12-31' };
+  resolvedJwtSecret = crypto.randomBytes(32).toString('hex');
+  console.warn('[auth] JWT_SECRET not set — using ephemeral in-memory secret for local dev/test.');
 }
-const inRange = (d, r) => !!d && d >= r.start && d <= r.end;
+const getJwtSecret = () => process.env.JWT_SECRET || resolvedJwtSecret;
 
-/** Work out payment status/balance from the amounts and due date. */
-function finishPayment(p) {
-  p.amountDue = num(p.amountDue);
-  p.amountPaid = num(p.amountPaid);
-  p.remainingBalance = Math.max(0, p.amountDue - p.amountPaid);
-  if (p.remainingBalance === 0) p.status = 'Paid';
-  else if (p.amountPaid > 0) p.status = 'Partial';
-  else p.status = p.dueDate < today() ? 'Overdue' : 'Pending';
-  return p;
-}
-
-const rateBuckets = new Map();
-function isRateLimited(req, bucket, limit = 5, windowMs = 15 * 60 * 1000) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip || 'unknown';
-  const key = `${bucket}:${ip}`;
-  const now = Date.now();
-  const hits = (rateBuckets.get(key) || []).filter((t) => now - t < windowMs);
-  if (hits.length >= limit) {
-    rateBuckets.set(key, hits);
-    return true;
-  }
-  hits.push(now);
-  rateBuckets.set(key, hits);
-  if (rateBuckets.size > 1000) rateBuckets.clear();
-  return false;
-}
-
-const publicReview = (r) => ({
-  id: r.id,
-  propertyId: r.propertyId,
-  reviewerName: r.reviewerName,
-  rating: r.rating,
-  title: r.title || '',
-  comment: r.comment,
-  status: r.status,
-  ownerReply: r.ownerReply || null,
-  repliedAt: r.repliedAt || null,
-  createdAt: r.createdAt,
-});
-
-function enrichProperty(p) {
-  const st = db.get();
-  const rooms = st.rooms.filter((r) => r.propertyId === p.id);
-  const open = rooms.filter((r) => r.status === 'Available' && r.availableBeds > 0);
-  const approvedReviews = (st.reviews || []).filter((r) => r.propertyId === p.id && r.status === 'Approved');
-  const reviewCount = approvedReviews.length;
-  const averageRating = reviewCount ? Math.round((sum(approvedReviews, (r) => r.rating) / reviewCount) * 10) / 10 : 0;
-  const typeMap = new Map();
-  open.forEach((r) => {
-    const cur = typeMap.get(r.roomType) || { roomType: r.roomType, roomsAvailable: 0, bedsFree: 0 };
-    cur.roomsAvailable += 1;
-    cur.bedsFree += r.availableBeds;
-    typeMap.set(r.roomType, cur);
-  });
-  return {
-    ...p,
-    totalRoomsCount: rooms.length,
-    availableRoomsCount: open.length,
-    availableBedsCount: sum(open, (r) => r.availableBeds),
-    availableRoomTypes: [...typeMap.values()],
-    averageRating,
-    reviewCount,
-  };
-}
-
-// ============================== authorization ==============================
-function auth(req, res, next) {
-  const h = req.headers.authorization || '';
-  try {
-    req.user = jwt.verify(h.startsWith('Bearer ') ? h.slice(7) : '', JWT_SECRET);
-    next();
-  } catch {
-    fail(res, 401, 'Please log in again.');
-  }
-}
-const allow = (...roles) => (req, res, next) =>
-  roles.includes(req.user.role) ? next() : fail(res, 403, 'You do not have permission for this action.');
-const OWNER = allow('owner', 'admin');   // owner + system admin
-const ANY = allow('owner', 'admin', 'staff');
-
-const publicUser = (u) => ({ id: u.id, fullName: u.fullName, email: u.email, role: u.role, phone: u.phone });
-
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', mode: process.env.VERCEL ? 'demo (Vercel)' : 'local' }));
-
-app.post('/api/auth/login', asyncSafe((req, res) => {
-  const email = str(req.body.email).toLowerCase();
-  const user = db.get().users.find((u) => u.email.toLowerCase() === email && u.isActive);
-  if (!user || !bcrypt.compareSync(String(req.body.password || ''), user.passwordHash))
-    return fail(res, 401, 'Invalid email or password.');
-  const token = jwt.sign({ id: user.id, role: user.role, name: user.fullName }, JWT_SECRET, { expiresIn: '12h' });
-  res.json({ token, user: publicUser(user) });
-}));
-
-app.get('/api/auth/me', auth, (req, res) => {
-  const u = db.get().users.find((x) => x.id === req.user.id);
-  u ? res.json(publicUser(u)) : fail(res, 404, 'User not found.');
-});
-
-// ============================== public portal ==============================
-app.get('/api/public/properties', asyncSafe((req, res) => {
-  const { q = '', type = '', minPrice = '', maxPrice = '', occupants = '', onlyAvailable = '', amenity = '' } = req.query;
-  let list = db.get().properties.filter((p) => p.isPublished).map(enrichProperty);
-  const needle = q.trim().toLowerCase();
-  if (needle) list = list.filter((p) => [p.name, p.city, p.address].join(' ').toLowerCase().includes(needle));
-  if (type) list = list.filter((p) => p.propertyType === type);
-  if (minPrice) list = list.filter((p) => p.monthlyPrice >= num(minPrice));
-  if (maxPrice) list = list.filter((p) => p.monthlyPrice <= num(maxPrice));
-  if (amenity) list = list.filter((p) => p.amenities.includes(amenity));
-  if (onlyAvailable === 'true') list = list.filter((p) => p.availableRoomsCount > 0);
-  if (occupants) {
-    const rooms = db.get().rooms;
-    list = list.filter((p) => rooms.some((r) => r.propertyId === p.id && r.status === 'Available' && r.availableBeds >= num(occupants)));
-  }
-  res.json(list);
-}));
-
-app.get('/api/public/properties/:id', asyncSafe((req, res) => {
-  const p = db.get().properties.find((x) => x.id === num(req.params.id) && x.isPublished);
-  if (!p) return fail(res, 404, 'Property not found.');
-  res.json({
-    ...enrichProperty(p),
-    buildings: db.get().buildings.filter((b) => b.propertyId === p.id),
-    rooms: db.get().rooms.filter((r) => r.propertyId === p.id),
-  });
-}));
-
-app.post('/api/public/applications', asyncSafe((req, res) => {
-  const b = req.body;
-  const s = db.get();
-  const prop = s.properties.find((p) => p.id === num(b.propertyId) && p.isPublished);
-  if (!str(b.fullName) || !/^\S+@\S+\.\S+$/.test(str(b.email)) || !str(b.contactNumber) || !prop || !str(b.expectedMoveInDate))
-    return fail(res, 400, 'Please complete name, valid email, contact number, property and move-in date.');
-  const id = db.nextId('application');
-  const appl = {
-    id,
-    referenceNumber: `APP-${new Date().getFullYear()}-${1000 + id}`,
-    fullName: str(b.fullName), email: str(b.email), contactNumber: str(b.contactNumber),
-    propertyId: prop.id, preferredRoomType: str(b.preferredRoomType) || prop.propertyType,
-    assignedRoomId: null, expectedMoveInDate: str(b.expectedMoveInDate), reservationDate: null,
-    occupants: Math.max(1, num(b.occupants) || 1), message: str(b.message).slice(0, 500),
-    status: 'Pending', createdAt: new Date().toISOString(),
-  };
-  s.applications.push(appl);
-  db.save();
-  res.status(201).json({ referenceNumber: appl.referenceNumber, status: appl.status });
-}));
-
-// ---- public reviews
-app.get('/api/public/reviews/latest', asyncSafe((req, res) => {
-  const st = db.get();
-  const limit = Math.min(12, Math.max(1, num(req.query.limit) || 6));
-  const props = new Map(st.properties.filter((p) => p.isPublished).map((p) => [p.id, p.name]));
-  const latest = (st.reviews || [])
-    .filter((r) => r.status === 'Approved' && props.has(r.propertyId))
-    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id)
-    .slice(0, limit)
-    .map((r) => ({ ...publicReview(r), propertyName: props.get(r.propertyId) }));
-  res.json(latest);
-}));
-
-app.get('/api/public/properties/:id/reviews', asyncSafe((req, res) => {
-  const st = db.get();
-  const prop = st.properties.find((x) => x.id === num(req.params.id) && x.isPublished);
-  if (!prop) return fail(res, 404, 'Property not found.');
-  const list = (st.reviews || [])
-    .filter((r) => r.propertyId === prop.id && r.status === 'Approved')
-    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id);
-  const breakdown = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
-  list.forEach((r) => {
-    const k = Math.min(5, Math.max(1, Math.round(num(r.rating))));
-    breakdown[k] += 1;
-  });
-  const count = list.length;
-  const average = count ? Math.round((sum(list, (r) => r.rating) / count) * 10) / 10 : 0;
-  res.json({ average, count, breakdown, reviews: list.map(publicReview) });
-}));
-
-app.post('/api/public/reviews', asyncSafe((req, res) => {
-  if (isRateLimited(req, 'review', 5, 15 * 60 * 1000)) {
-    return fail(res, 429, 'Too many review submissions from this network. Please try again later.');
-  }
-  const b = req.body;
-  const st = db.get();
-  const prop = st.properties.find((p) => p.id === num(b.propertyId) && p.isPublished);
-  const reviewerName = str(b.reviewerName).slice(0, 80);
-  const email = str(b.email).toLowerCase().slice(0, 150);
-  const rating = Math.round(num(b.rating));
-  const title = str(b.title).slice(0, 120);
-  const comment = str(b.comment).slice(0, 600);
-  if (!prop) return fail(res, 404, 'Property not found.');
-  if (!reviewerName || !/^\S+@\S+\.\S+$/.test(email)) return fail(res, 400, 'Please enter your name and a valid email address.');
-  if (rating < 1 || rating > 5) return fail(res, 400, 'Please choose a star rating from 1 to 5.');
-  if (comment.length < 10) return fail(res, 400, 'Review comment must be at least 10 characters.');
-  const duplicate = (st.reviews || []).some((r) => r.propertyId === prop.id && r.email.toLowerCase() === email);
-  if (duplicate) return fail(res, 409, 'You have already submitted a review for this property.');
-  const rev = {
-    id: db.nextId('review'),
-    propertyId: prop.id,
-    reviewerName,
-    email,
-    rating,
-    title,
-    comment,
-    status: 'Pending',
-    ownerReply: null,
-    repliedAt: null,
-    createdAt: new Date().toISOString(),
-  };
-  st.reviews.push(rev);
-  db.save();
-  res.status(201).json({ id: rev.id, status: rev.status, message: 'Thanks! Your review will appear after approval.' });
-}));
-
-// ---- public contact
-app.post('/api/public/contact', asyncSafe((req, res) => {
-  if (isRateLimited(req, 'contact', 5, 15 * 60 * 1000)) {
-    return fail(res, 429, 'Too many messages sent recently. Please try again later.');
-  }
-  const b = req.body;
-  const fullName = str(b.fullName).slice(0, 100);
-  const email = str(b.email).toLowerCase().slice(0, 150);
-  const phone = str(b.phone).slice(0, 40);
-  const subject = str(b.subject).slice(0, 120);
-  const message = str(b.message).slice(0, 1000);
-  if (!fullName || !/^\S+@\S+\.\S+$/.test(email) || message.length < 10) {
-    return fail(res, 400, 'Please enter your name, a valid email, and a message (at least 10 characters).');
-  }
-  const msg = {
-    id: db.nextId('message'),
-    fullName,
-    email,
-    phone,
-    subject: subject || 'General inquiry',
-    message,
-    status: 'New',
-    createdAt: new Date().toISOString(),
-  };
-  db.get().messages.push(msg);
-  db.save();
-  res.status(201).json({ ok: true, id: msg.id, message: 'Message sent! We will get back to you soon.' });
-}));
-
-// ============================== dashboard ==============================
-app.get('/api/dashboard/summary', auth, ANY, asyncSafe((req, res) => {
-  const s = db.get();
-  const r = getRange(req.query);
-  const pays = s.payments.filter((p) => inRange(p.dueDate, r)).map((p) => finishPayment({ ...p }));
-  const exps = s.expenses.filter((e) => inRange(e.expenseDate, r));
-  const collected = sum(pays, (p) => p.amountPaid);
-  const expenses = sum(exps, (e) => e.amount);
-  const roomCount = (st) => s.rooms.filter((x) => x.status === st).length;
-  const activeTenants = s.tenants.filter((t) => t.status === 'Active');
-
-  const months = [...new Set([...pays.map((p) => p.dueDate.slice(0, 7)), ...exps.map((e) => e.expenseDate.slice(0, 7))])].sort();
-  const incomeByMonth = months.map((m) => sum(pays.filter((p) => p.dueDate.startsWith(m)), (p) => p.amountPaid));
-  const expenseByMonth = months.map((m) => sum(exps.filter((e) => e.expenseDate.startsWith(m)), (e) => e.amount));
-  const statuses = ['Paid', 'Partial', 'Pending', 'Overdue'];
-
-  res.json({
-    kpis: {
-      totalProperties: s.properties.length, totalBuildings: s.buildings.length, totalRooms: s.rooms.length,
-      availableRooms: roomCount('Available'), occupiedRooms: roomCount('Occupied'), reservedRooms: roomCount('Reserved'),
-      totalTenants: activeTenants.length,
-      monthlyExpectedIncome: sum(activeTenants, (t) => t.monthlyRent),
-      totalCollected: collected,
-      pendingPayments: sum(pays.filter((p) => ['Pending', 'Partial'].includes(p.status)), (p) => p.remainingBalance),
-      overduePayments: sum(pays.filter((p) => p.status === 'Overdue'), (p) => p.remainingBalance),
-      monthlyExpenses: expenses, netIncome: collected - expenses,
-      pendingReviews: (s.reviews || []).filter((rev) => rev.status === 'Pending').length,
-      unreadMessages: (s.messages || []).filter((m) => m.status === 'New').length,
-    },
-    charts: {
-      months, incomeByMonth, expenseByMonth,
-      occupancy: { labels: ['Available', 'Occupied', 'Reserved', 'Maintenance'], values: ['Available', 'Occupied', 'Reserved', 'Maintenance'].map(roomCount) },
-      paymentStatus: { labels: statuses, values: statuses.map((st) => pays.filter((p) => p.status === st).length) },
-      propertyPerformance: {
-        labels: s.properties.map((p) => p.name),
-        values: s.properties.map((p) => sum(pays.filter((x) => x.propertyId === p.id), (x) => x.amountPaid)),
+// ---------- security headers & CORS ----------
+const IS_VERCEL = !!process.env.VERCEL;
+app.use(
+  helmet({
+    frameguard: IS_VERCEL ? { action: 'sameorigin' } : false,
+    hsts: IS_VERCEL,
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: [
+          "'self'",
+          'https://unpkg.com',
+          'https://cdn.jsdelivr.net',
+          'https://cdnjs.cloudflare.com',
+        ],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          'https://fonts.googleapis.com',
+          'https://unpkg.com',
+        ],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+        imgSrc: [
+          "'self'",
+          'data:',
+          'blob:',
+          'https://tile.openstreetmap.org',
+          'https://*.tile.openstreetmap.org',
+          'https://unpkg.com',
+          'https://*.public.blob.vercel-storage.com',
+        ],
+        connectSrc: ["'self'"],
+        frameAncestors: IS_VERCEL ? ["'self'"] : ["'self'", 'https:', 'http://localhost:*'],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        ...(IS_VERCEL ? {} : { upgradeInsecureRequests: null }),
       },
     },
-  });
-}));
+  })
+);
 
-// ============================== CRUD modules ==============================
-const s = () => db.get();
-const byId = (list, id) => list.find((x) => x.id === num(id));
-
-// ---- properties
-app.get('/api/properties', auth, ANY, (_q, res) => res.json(s().properties.map(enrichProperty)));
-function readProperty(b, base = {}) {
-  const lines = (v) => (Array.isArray(v) ? v : String(v || '').split('\n')).map((x) => x.trim()).filter(Boolean);
-  return {
-    ...base, name: str(b.name), propertyType: str(b.propertyType), address: str(b.address), city: str(b.city),
-    latitude: num(b.latitude), longitude: num(b.longitude), description: str(b.description),
-    monthlyPrice: num(b.monthlyPrice), amenities: lines(b.amenities), houseRules: lines(b.houseRules),
-    contactPhone: str(b.contactPhone), contactEmail: str(b.contactEmail),
-    locationAccess: str(b.locationAccess), nearbyPlaces: str(b.nearbyPlaces),
-    depositPolicy: str(b.depositPolicy), utilitiesPolicy: str(b.utilitiesPolicy),
-    inclusions: str(b.inclusions), curfewPolicy: str(b.curfewPolicy),
-    images: lines(b.images).length ? lines(b.images) : base.images || ['/images/APT-01.png'],
-    isPublished: b.isPublished === undefined ? base.isPublished !== false : !!b.isPublished,
-  };
+function getAllowedOrigins() {
+  const set = new Set(['http://localhost:3000', 'http://127.0.0.1:3000']);
+  if (process.env.VERCEL_URL) set.add(`https://${process.env.VERCEL_URL}`);
+  if (process.env.APP_URL) set.add(process.env.APP_URL.replace(/\/$/, ''));
+  (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+    .forEach((o) => set.add(o));
+  return set;
 }
-app.post('/api/properties', auth, OWNER, asyncSafe((req, res) => {
-  const p = readProperty(req.body, { id: db.nextId('property'), ownerId: req.user.id, createdAt: new Date().toISOString() });
-  if (!p.name || !p.propertyType || !p.address) return fail(res, 400, 'Name, type and address are required.');
-  s().properties.push(p); db.save(); res.status(201).json(p);
-}));
-app.put('/api/properties/:id', auth, OWNER, asyncSafe((req, res) => {
-  const i = s().properties.findIndex((p) => p.id === num(req.params.id));
-  if (i < 0) return fail(res, 404, 'Property not found.');
-  s().properties[i] = readProperty(req.body, s().properties[i]); db.save(); res.json(s().properties[i]);
-}));
-app.patch('/api/properties/:id/publish', auth, OWNER, asyncSafe((req, res) => {
-  const p = byId(s().properties, req.params.id);
-  if (!p) return fail(res, 404, 'Property not found.');
-  p.isPublished = !p.isPublished; db.save(); res.json(p);
-}));
-app.delete('/api/properties/:id', auth, OWNER, asyncSafe((req, res) => {
-  const id = num(req.params.id);
-  if (s().tenants.some((t) => t.propertyId === id && t.status === 'Active')) return fail(res, 409, 'Property has active tenants.');
-  const st = s();
-  st.properties = st.properties.filter((p) => p.id !== id);
-  st.buildings = st.buildings.filter((b) => b.propertyId !== id);
-  st.rooms = st.rooms.filter((r) => r.propertyId !== id);
-  db.save(); res.json({ ok: true });
-}));
 
-// ---- buildings
-app.get('/api/buildings', auth, ANY, (_q, res) => res.json(s().buildings));
-app.post('/api/buildings', auth, OWNER, asyncSafe((req, res) => {
-  const b = req.body;
-  if (!byId(s().properties, b.propertyId) || !str(b.name)) return fail(res, 400, 'Property and name are required.');
-  const row = { id: db.nextId('building'), propertyId: num(b.propertyId), name: str(b.name), floors: Math.max(1, num(b.floors)), description: str(b.description), createdAt: new Date().toISOString() };
-  s().buildings.push(row); db.save(); res.status(201).json(row);
-}));
-app.put('/api/buildings/:id', auth, OWNER, asyncSafe((req, res) => {
-  const row = byId(s().buildings, req.params.id);
-  if (!row) return fail(res, 404, 'Building not found.');
-  Object.assign(row, { name: str(req.body.name) || row.name, floors: Math.max(1, num(req.body.floors)), description: str(req.body.description) });
-  s().rooms.filter((r) => r.buildingId === row.id).forEach((r) => (r.buildingName = row.name));
-  db.save(); res.json(row);
-}));
-app.delete('/api/buildings/:id', auth, OWNER, asyncSafe((req, res) => {
-  const id = num(req.params.id);
-  if (s().rooms.some((r) => r.buildingId === id)) return fail(res, 409, 'Delete or move the rooms in this building first.');
-  s().buildings = s().buildings.filter((b) => b.id !== id); db.save(); res.json({ ok: true });
-}));
-
-// ---- rooms
-app.get('/api/rooms', auth, ANY, (_q, res) => res.json(s().rooms));
-function readRoom(b, base = {}) {
-  const building = byId(s().buildings, b.buildingId);
-  return {
-    ...base, propertyId: building ? building.propertyId : base.propertyId, buildingId: building ? building.id : base.buildingId,
-    buildingName: building ? building.name : base.buildingName, floorNumber: num(b.floorNumber) || 1,
-    roomNumber: str(b.roomNumber), roomType: str(b.roomType), capacity: Math.max(1, num(b.capacity)),
-    monthlyPrice: num(b.monthlyPrice), status: str(b.status) || 'Available', description: str(b.description),
-    images: base.images || [],
-  };
-}
-app.post('/api/rooms', auth, ANY, asyncSafe((req, res) => {
-  const room = readRoom(req.body, { id: db.nextId('room'), occupiedBeds: 0 });
-  if (!room.buildingId || !room.roomNumber) return fail(res, 400, 'Building and room number are required.');
-  if (s().rooms.some((r) => r.buildingId === room.buildingId && r.roomNumber === room.roomNumber)) return fail(res, 409, 'Room number already exists in this building.');
-  s().rooms.push(room); db.recalcRooms(); db.save(); res.status(201).json(room);
-}));
-app.put('/api/rooms/:id', auth, ANY, asyncSafe((req, res) => {
-  const i = s().rooms.findIndex((r) => r.id === num(req.params.id));
-  if (i < 0) return fail(res, 404, 'Room not found.');
-  const next = readRoom(req.body, s().rooms[i]);
-  if (next.capacity < next.occupiedBeds) return fail(res, 409, 'Capacity cannot be lower than current occupants.');
-  s().rooms[i] = next; db.recalcRooms(); db.save(); res.json(next);
-}));
-app.delete('/api/rooms/:id', auth, OWNER, asyncSafe((req, res) => {
-  const id = num(req.params.id);
-  if (s().tenants.some((t) => t.roomId === id && t.status === 'Active')) return fail(res, 409, 'Room has active tenants.');
-  s().rooms = s().rooms.filter((r) => r.id !== id); db.save(); res.json({ ok: true });
-}));
-
-// ---- tenants
-app.get('/api/tenants', auth, ANY, (_q, res) => res.json(s().tenants));
-function checkRoomSpace(roomId, ignoreTenantId) {
-  if (!roomId) return null;
-  const room = byId(s().rooms, roomId);
-  if (!room) return 'Room not found.';
-  if (room.status === 'Maintenance') return 'Room is under maintenance.';
-  const used = s().tenants.filter((t) => t.roomId === room.id && t.status === 'Active' && t.id !== ignoreTenantId).length;
-  return used >= room.capacity ? `Room ${room.roomNumber} is full (capacity ${room.capacity}).` : null;
-}
-function readTenant(b, base = {}) {
-  const room = byId(s().rooms, b.roomId);
-  return {
-    ...base, fullName: str(b.fullName), email: str(b.email), contactNumber: str(b.contactNumber), address: str(b.address),
-    emergencyContact: str(b.emergencyContact), propertyId: room ? room.propertyId : num(b.propertyId), roomId: room ? room.id : null,
-    moveInDate: str(b.moveInDate) || today(), moveOutDate: str(b.moveOutDate) || null,
-    monthlyRent: num(b.monthlyRent) || (room ? room.monthlyPrice : 0), securityDeposit: num(b.securityDeposit),
-    status: str(b.status) || 'Active',
-  };
-}
-app.post('/api/tenants', auth, ANY, asyncSafe((req, res) => {
-  const t = readTenant(req.body, { id: db.nextId('tenant'), createdAt: new Date().toISOString() });
-  if (!t.fullName || !t.propertyId) return fail(res, 400, 'Name and room/property are required.');
-  const err = t.status === 'Active' && checkRoomSpace(t.roomId); if (err) return fail(res, 409, err);
-  s().tenants.push(t); db.recalcRooms(); db.save(); res.status(201).json(t);
-}));
-app.put('/api/tenants/:id', auth, ANY, asyncSafe((req, res) => {
-  const i = s().tenants.findIndex((t) => t.id === num(req.params.id));
-  if (i < 0) return fail(res, 404, 'Tenant not found.');
-  const t = readTenant(req.body, s().tenants[i]);
-  const err = t.status === 'Active' && checkRoomSpace(t.roomId, t.id); if (err) return fail(res, 409, err);
-  s().tenants[i] = t; db.recalcRooms(); db.save(); res.json(t);
-}));
-app.post('/api/tenants/:id/move-out', auth, ANY, asyncSafe((req, res) => {
-  const t = byId(s().tenants, req.params.id);
-  if (!t) return fail(res, 404, 'Tenant not found.');
-  Object.assign(t, { status: 'Former Tenant', moveOutDate: today() });
-  db.recalcRooms(); db.save(); res.json(t);
-}));
-app.delete('/api/tenants/:id', auth, OWNER, asyncSafe((req, res) => {
-  s().tenants = s().tenants.filter((t) => t.id !== num(req.params.id)); db.recalcRooms(); db.save(); res.json({ ok: true });
-}));
-
-// ---- applications
-app.get('/api/applications', auth, ANY, (_q, res) => res.json(s().applications));
-app.patch('/api/applications/:id/status', auth, ANY, asyncSafe((req, res) => {
-  const a = byId(s().applications, req.params.id);
-  const { status, assignedRoomId, reservationDate } = req.body;
-  if (!a) return fail(res, 404, 'Application not found.');
-  if (!['Pending', 'Approved', 'Rejected', 'Reserved', 'Completed', 'Cancelled'].includes(status)) return fail(res, 400, 'Invalid status.');
-  const roomId = assignedRoomId ? num(assignedRoomId) : a.assignedRoomId;
-  if (['Approved', 'Reserved'].includes(status) && roomId) {
-    const room = byId(s().rooms, roomId);
-    if (!room || room.status === 'Maintenance' || room.availableBeds < 1) return fail(res, 409, 'That room is not available.');
-    const clash = s().applications.find((x) => x.id !== a.id && x.assignedRoomId === roomId && ['Approved', 'Reserved'].includes(x.status) && room.capacity === 1);
-    if (clash) return fail(res, 409, `Room already reserved by ${clash.referenceNumber}.`);
-  }
-  Object.assign(a, { status, assignedRoomId: roomId || null, reservationDate: str(reservationDate) || a.reservationDate || (status === 'Reserved' ? today() : null) });
-  db.recalcRooms(); db.save(); res.json(a);
-}));
-app.post('/api/applications/:id/convert', auth, ANY, asyncSafe((req, res) => {
-  const a = byId(s().applications, req.params.id);
-  if (!a) return fail(res, 404, 'Application not found.');
-  if (a.status === 'Completed') return fail(res, 409, 'Already converted.');
-  const room = byId(s().rooms, a.assignedRoomId);
-  if (!room) return fail(res, 400, 'Assign a room before converting.');
-  const err = checkRoomSpace(room.id); if (err) return fail(res, 409, err);
-  const t = { id: db.nextId('tenant'), fullName: a.fullName, email: a.email, contactNumber: a.contactNumber, address: '', emergencyContact: '',
-    propertyId: room.propertyId, roomId: room.id, moveInDate: a.expectedMoveInDate, moveOutDate: null, monthlyRent: room.monthlyPrice,
-    securityDeposit: room.monthlyPrice, status: 'Active', createdAt: new Date().toISOString() };
-  s().tenants.push(t); a.status = 'Completed'; db.recalcRooms(); db.save(); res.status(201).json(t);
-}));
-
-// ---- payments
-app.get('/api/payments', auth, ANY, (_q, res) => res.json(s().payments.map((p) => finishPayment({ ...p }))));
-app.post('/api/payments', auth, ANY, asyncSafe((req, res) => {
-  const b = req.body;
-  const t = byId(s().tenants, b.tenantId);
-  if (!t) return fail(res, 400, 'Choose a tenant.');
-  const month = str(b.billingMonth);
-  if (!/^\d{4}-\d{2}$/.test(month)) return fail(res, 400, 'Billing month must be YYYY-MM.');
-  if (s().payments.some((p) => p.tenantId === t.id && p.billingMonth === month)) return fail(res, 409, 'A payment record for this tenant and month already exists. Edit it instead.');
-  const id = db.nextId('payment');
-  const p = finishPayment({
-    id, tenantId: t.id, propertyId: t.propertyId, roomId: t.roomId, billingMonth: month,
-    dueDate: str(b.dueDate) || `${month}-05`, paymentDate: num(b.amountPaid) > 0 ? str(b.paymentDate) || today() : null,
-    amountDue: num(b.amountDue) || t.monthlyRent, amountPaid: num(b.amountPaid), paymentMethod: str(b.paymentMethod) || 'Cash',
-    referenceNumber: `TXN-${month.replace('-', '')}-${String(id).padStart(3, '0')}`,
-    receiptNumber: `RCPT-${new Date().getFullYear()}-${String(id).padStart(4, '0')}`, notes: str(b.notes),
-  });
-  s().payments.push(p); db.save(); res.status(201).json(p);
-}));
-app.put('/api/payments/:id', auth, ANY, asyncSafe((req, res) => {
-  const p = byId(s().payments, req.params.id);
-  if (!p) return fail(res, 404, 'Payment not found.');
-  const b = req.body;
-  Object.assign(p, { amountDue: num(b.amountDue) || p.amountDue, amountPaid: num(b.amountPaid), paymentMethod: str(b.paymentMethod) || p.paymentMethod,
-    dueDate: str(b.dueDate) || p.dueDate, paymentDate: num(b.amountPaid) > 0 ? str(b.paymentDate) || p.paymentDate || today() : null, notes: str(b.notes) });
-  finishPayment(p); db.save(); res.json(p);
-}));
-
-// ---- expenses
-app.get('/api/expenses', auth, ANY, (_q, res) => res.json(s().expenses));
-function readExpense(b, base = {}) {
-  return { ...base, propertyId: num(b.propertyId), category: str(b.category) || 'Other Expenses', description: str(b.description), amount: num(b.amount),
-    expenseDate: str(b.expenseDate) || today(), paymentMethod: str(b.paymentMethod) || 'Cash', receiptReference: str(b.receiptReference) };
-}
-app.post('/api/expenses', auth, ANY, asyncSafe((req, res) => {
-  const e = readExpense(req.body, { id: db.nextId('expense'), createdAt: new Date().toISOString() });
-  if (!byId(s().properties, e.propertyId) || !e.description || e.amount <= 0) return fail(res, 400, 'Property, description and a positive amount are required.');
-  s().expenses.push(e); db.save(); res.status(201).json(e);
-}));
-app.put('/api/expenses/:id', auth, ANY, asyncSafe((req, res) => {
-  const i = s().expenses.findIndex((e) => e.id === num(req.params.id));
-  if (i < 0) return fail(res, 404, 'Expense not found.');
-  s().expenses[i] = readExpense(req.body, s().expenses[i]); db.save(); res.json(s().expenses[i]);
-}));
-app.delete('/api/expenses/:id', auth, OWNER, asyncSafe((req, res) => {
-  s().expenses = s().expenses.filter((e) => e.id !== num(req.params.id)); db.save(); res.json({ ok: true });
-}));
-
-// ---- reviews (owner/staff moderation)
-app.get('/api/reviews', auth, ANY, (_q, res) => {
-  const list = [...(s().reviews || [])].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id);
-  res.json(list);
-});
-app.patch('/api/reviews/:id/status', auth, ANY, asyncSafe((req, res) => {
-  const rev = byId(s().reviews || [], req.params.id);
-  if (!rev) return fail(res, 404, 'Review not found.');
-  const status = str(req.body.status);
-  if (!['Pending', 'Approved', 'Rejected'].includes(status)) return fail(res, 400, 'Invalid review status.');
-  rev.status = status;
-  db.save();
-  res.json(rev);
-}));
-app.post('/api/reviews/:id/reply', auth, ANY, asyncSafe((req, res) => {
-  const rev = byId(s().reviews || [], req.params.id);
-  if (!rev) return fail(res, 404, 'Review not found.');
-  const reply = str(req.body.ownerReply).slice(0, 600);
-  if (!reply) return fail(res, 400, 'Reply text cannot be empty.');
-  rev.ownerReply = reply;
-  rev.repliedAt = new Date().toISOString();
-  db.save();
-  res.json(rev);
-}));
-app.delete('/api/reviews/:id', auth, OWNER, asyncSafe((req, res) => {
-  const id = num(req.params.id);
-  if (!byId(s().reviews || [], id)) return fail(res, 404, 'Review not found.');
-  s().reviews = s().reviews.filter((r) => r.id !== id);
-  db.save();
-  res.json({ ok: true });
-}));
-
-// ---- contact messages (owner/staff inbox)
-app.get('/api/messages', auth, ANY, (_q, res) => {
-  const list = [...(s().messages || [])].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') || b.id - a.id);
-  res.json(list);
-});
-app.patch('/api/messages/:id/status', auth, ANY, asyncSafe((req, res) => {
-  const msg = byId(s().messages || [], req.params.id);
-  if (!msg) return fail(res, 404, 'Message not found.');
-  const status = str(req.body.status);
-  if (!['New', 'Read', 'Replied'].includes(status)) return fail(res, 400, 'Invalid status.');
-  msg.status = status;
-  db.save();
-  res.json(msg);
-}));
-app.delete('/api/messages/:id', auth, OWNER, asyncSafe((req, res) => {
-  const id = num(req.params.id);
-  if (!byId(s().messages || [], id)) return fail(res, 404, 'Message not found.');
-  s().messages = s().messages.filter((m) => m.id !== id);
-  db.save();
-  res.json({ ok: true });
-}));
-
-// ============================== reports ==============================
-app.get('/api/reports/financial', auth, ANY, asyncSafe((req, res) => {
-  const r = getRange(req.query);
-  const st = s();
-  const pays = st.payments.filter((p) => inRange(p.dueDate, r)).map((p) => finishPayment({ ...p }));
-  const exps = st.expenses.filter((e) => inRange(e.expenseDate, r));
-  const collected = sum(pays, (p) => p.amountPaid);
-  const expenses = sum(exps, (e) => e.amount);
-  const occupied = st.rooms.filter((x) => x.status === 'Occupied').length;
-  res.json({
-    range: r,
-    summary: { expectedIncome: sum(pays, (p) => p.amountDue), collected, outstanding: sum(pays, (p) => p.remainingBalance), expenses, netIncome: collected - expenses },
-    occupancy: {
-      totalRooms: st.rooms.length, occupied, available: st.rooms.filter((x) => x.status === 'Available').length,
-      reserved: st.rooms.filter((x) => x.status === 'Reserved').length,
-      percent: st.rooms.length ? Math.round((occupied / st.rooms.length) * 100) : 0,
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      const allowed = getAllowedOrigins();
+      if (allowed.has(origin)) return cb(null, true);
+      return cb(new Error('Origin not allowed by CORS'));
     },
-    byProperty: st.properties.map((p) => ({ name: p.name, income: sum(pays.filter((x) => x.propertyId === p.id), (x) => x.amountPaid), expenses: sum(exps.filter((x) => x.propertyId === p.id), (x) => x.amount) })),
-    byCategory: [...new Set(exps.map((e) => e.category))].map((c) => ({ category: c, amount: sum(exps.filter((e) => e.category === c), (e) => e.amount) })),
-    byTenant: st.tenants.map((t) => ({ name: t.fullName, paid: sum(pays.filter((p) => p.tenantId === t.id), (p) => p.amountPaid), balance: sum(pays.filter((p) => p.tenantId === t.id), (p) => p.remainingBalance) })).filter((x) => x.paid || x.balance),
+    credentials: true,
+  })
+);
+
+app.use(cookieParser());
+app.use(express.json({ limit: '4mb' }));
+
+// ---------- rate limiting ----------
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Please wait 15 minutes and try again.' },
+});
+
+const publicWriteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 25,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many submissions from your network. Please try again shortly.' },
+});
+
+// ---------- cookie & CSRF helpers ----------
+function cookieBaseOpts(req) {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || !!process.env.VERCEL;
+  return {
+    path: '/',
+    secure: isHttps,
+    sameSite: isHttps ? 'none' : 'lax',
+    ...(isHttps ? { partitioned: true } : {}),
+  };
+}
+
+function setSessionCookie(req, res, token) {
+  res.cookie(SESSION_COOKIE, token, {
+    ...cookieBaseOpts(req),
+    httpOnly: true,
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+}
+
+function ensureCsrfCookie(req, res) {
+  let token = req.cookies?.[CSRF_COOKIE];
+  if (!token || typeof token !== 'string' || token.length < 16) {
+    token = crypto.randomBytes(24).toString('hex');
+    res.cookie(CSRF_COOKIE, token, {
+      ...cookieBaseOpts(req),
+      httpOnly: false,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+  }
+  return token;
+}
+
+function clearSessionCookie(req, res) {
+  res.clearCookie(SESSION_COOKIE, { ...cookieBaseOpts(req), httpOnly: true });
+}
+
+// Require matching double-submit CSRF token when a session cookie is active on state-changing routes.
+function csrfProtect(req, res, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  if (!req.path.startsWith('/api/')) return next();
+  if (req.path === '/api/cron/daily') return next();
+  const hasSessionCookie = !!req.cookies?.[SESSION_COOKIE];
+  if (!hasSessionCookie) return next();
+
+  const headerToken = req.get('x-csrf-token');
+  const cookieToken = req.cookies?.[CSRF_COOKIE];
+  if (!headerToken || !cookieToken || headerToken !== cookieToken) {
+    return res.status(403).json({ error: 'Invalid or missing CSRF token. Please refresh and try again.' });
+  }
+  const origin = req.get('origin');
+  const host = req.get('host');
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost !== host && !getAllowedOrigins().has(origin)) {
+        return res.status(403).json({ error: 'Origin mismatch.' });
+      }
+    } catch {
+      return res.status(403).json({ error: 'Invalid Origin header.' });
+    }
+  }
+  next();
+}
+app.use(csrfProtect);
+
+// ---------- auth helpers & RBAC ----------
+function readAuthToken(req) {
+  if (req.cookies?.[SESSION_COOKIE]) return req.cookies[SESSION_COOKIE];
+  const hdr = req.get('authorization') || '';
+  if (hdr.startsWith('Bearer ')) return hdr.slice(7).trim();
+  return null;
+}
+
+async function attachOptionalUser(req, res, next) {
+  const token = readAuthToken(req);
+  if (!token) return next();
+  try {
+    const payload = jwt.verify(token, getJwtSecret());
+    const user = await db.findUserById(payload.id);
+    if (user && user.isActive) {
+      req.user = user;
+      req.ownerId = await db.getOwnerIdForUser(user);
+    }
+  } catch {
+    // ignore expired/invalid optional token
+  }
+  next();
+}
+
+async function requireAuth(req, res, next) {
+  const token = readAuthToken(req);
+  if (!token) return res.status(401).json({ error: 'Authentication required.' });
+  try {
+    const payload = jwt.verify(token, getJwtSecret());
+    const user = await db.findUserById(payload.id);
+    if (!user || !user.isActive) return res.status(401).json({ error: 'Session is no longer valid.' });
+    req.user = user;
+    req.ownerId = await db.getOwnerIdForUser(user);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired session.' });
+  }
+}
+
+const requireRoles = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'You do not have permission for this action.' });
+  }
+  next();
+};
+const requireStaff = requireRoles('staff', 'owner', 'admin');
+const requireOwner = requireRoles('owner', 'admin');
+const requireAdmin = requireRoles('admin');
+
+function safeUserDto(u, ownerId = null) {
+  return {
+    id: u.id,
+    fullName: u.fullName,
+    email: u.email,
+    role: u.role,
+    phone: u.phone || '',
+    ownerId: ownerId ?? u.ownerId ?? null,
+  };
+}
+
+// ---------- masking helpers for staff role ----------
+function maskEmail(val) {
+  const s = String(val || '');
+  const at = s.indexOf('@');
+  if (at <= 0) return s ? '***' : '';
+  const local = s.slice(0, at);
+  return `${local[0]}***${s.slice(at)}`;
+}
+
+function maskPhone(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  if (s.length <= 4) return '****';
+  const tail = s.slice(-4);
+  const head = s.startsWith('+') ? s.slice(0, 5) : s.slice(0, 2);
+  return `${head} *** ${tail}`;
+}
+
+function formatTenantForRole(t, role) {
+  if (role !== 'staff') return t;
+  return {
+    id: t.id,
+    ownerId: t.ownerId,
+    fullName: t.fullName,
+    email: maskEmail(t.email),
+    contactNumber: maskPhone(t.contactNumber),
+    propertyId: t.propertyId,
+    roomId: t.roomId,
+    moveInDate: t.moveInDate,
+    moveOutDate: t.moveOutDate,
+    monthlyRent: t.monthlyRent,
+    status: t.status,
+    leaseEndDate: t.leaseEndDate,
+    leaseStatus: t.leaseStatus,
+    masked: true,
+  };
+}
+
+function formatAppForRole(a, role) {
+  if (role !== 'staff') return a;
+  return {
+    ...a,
+    email: maskEmail(a.email),
+    contactNumber: maskPhone(a.contactNumber),
+    hasDocument: false,
+    masked: true,
+  };
+}
+
+// ---------- file magic-byte helpers ----------
+function detectFileSignature(buf, allowPdf = false) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { ext: 'jpg', mime: 'image/jpeg' };
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) {
+    return { ext: 'png', mime: 'image/png' };
+  }
+  if (buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { ext: 'webp', mime: 'image/webp' };
+  }
+  if (allowPdf && buf.subarray(0, 5).toString('ascii') === '%PDF-') {
+    return { ext: 'pdf', mime: 'application/pdf' };
+  }
+  return null;
+}
+
+function decodeBase64Payload(input) {
+  const raw = String(input || '').replace(/^data:[^;]+;base64,/, '').trim();
+  const buf = Buffer.from(raw, 'base64');
+  return buf;
+}
+
+async function notifyWaitlistForProperty(propertyId, propertyName, roomNumber = '') {
+  try {
+    const waiting = await db.getWaitingForProperty(propertyId);
+    if (!waiting.length) return;
+    await Promise.all(
+      waiting.map((w) =>
+        email.sendWaitlistAlertEmail({
+          to: w.email,
+          fullName: w.fullName,
+          propertyName,
+          roomNumber,
+        })
+      )
+    );
+    await db.markWaitlistNotified(waiting.map((w) => w.id));
+  } catch (err) {
+    console.warn('[waitlist] Notification error:', err.message);
+  }
+}
+
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// ============================================================
+// HEALTH & CSRF
+// ============================================================
+app.get('/api/health', wrap(async (req, res) => {
+  const h = await db.healthCheck();
+  res.status(h.ok ? 200 : 503).json(h);
+}));
+
+app.get('/api/auth/csrf', (req, res) => {
+  const csrfToken = ensureCsrfCookie(req, res);
+  res.json({ csrfToken });
+});
+
+// ============================================================
+// AUTHENTICATION & CUSTOMER SELF-SERVICE
+// ============================================================
+app.post('/api/auth/login', authLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.loginSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const { email: userEmail, password } = parsed.data;
+
+  const user = await db.findUserByEmail(userEmail);
+  if (!user || !user.isActive) {
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+  if (user.lockedUntil && new Date(user.lockedUntil).getTime() > Date.now()) {
+    return res.status(423).json({
+      error: 'Account temporarily locked due to too many failed login attempts. Try again in 15 minutes.',
+    });
+  }
+
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) {
+    const lockInfo = await db.recordFailedLogin(user.id);
+    await db.logAudit({
+      userId: user.id,
+      action: 'LOGIN_FAILED',
+      entityType: 'user',
+      entityId: user.id,
+      details: { attempts: lockInfo?.failed_login_attempts || 1 },
+      ipAddress: req.ip,
+    });
+    if (lockInfo?.locked_until) {
+      return res.status(423).json({
+        error: 'Too many failed login attempts. Account locked for 15 minutes.',
+      });
+    }
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+
+  await db.clearFailedLogins(user.id);
+  const ownerId = await db.getOwnerIdForUser(user);
+  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, getJwtSecret(), { expiresIn: '8h' });
+  setSessionCookie(req, res, token);
+  const csrfToken = ensureCsrfCookie(req, res);
+
+  await db.logAudit({
+    userId: user.id,
+    action: 'LOGIN_SUCCESS',
+    entityType: 'user',
+    entityId: user.id,
+    ipAddress: req.ip,
+  });
+
+  res.json({ user: safeUserDto(user, ownerId), csrfToken });
+}));
+
+app.post('/api/auth/register', authLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.registerSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const { fullName, email: userEmail, password, phone } = parsed.data;
+
+  const existing = await db.findUserByEmail(userEmail);
+  if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const user = await db.createUser({
+    fullName,
+    email: userEmail,
+    passwordHash,
+    role: 'customer',
+    phone,
+    consentAccepted: true,
+  });
+
+  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, getJwtSecret(), { expiresIn: '8h' });
+  setSessionCookie(req, res, token);
+  const csrfToken = ensureCsrfCookie(req, res);
+  await db.logAudit({
+    userId: user.id,
+    action: 'REGISTER_CUSTOMER',
+    entityType: 'user',
+    entityId: user.id,
+    ipAddress: req.ip,
+  });
+  res.status(201).json({ user: safeUserDto(user), csrfToken });
+}));
+
+app.post('/api/auth/logout', attachOptionalUser, wrap(async (req, res) => {
+  if (req.user) {
+    await db.logAudit({ userId: req.user.id, action: 'LOGOUT', entityType: 'user', entityId: req.user.id, ipAddress: req.ip });
+  }
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+}));
+
+app.post('/api/auth/forgot-password', authLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.forgotPasswordSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+  const user = await db.findUserByEmail(parsed.data.email);
+  if (user && user.isActive) {
+    const rawToken = crypto.randomBytes(24).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    await db.createPasswordReset(user.id, tokenHash, expiresAt);
+
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const resetUrl = `${origin}/account.html?resetToken=${encodeURIComponent(rawToken)}`;
+    await email.sendPasswordResetEmail({ to: user.email, fullName: user.fullName, resetUrl });
+    await db.logAudit({ userId: user.id, action: 'PASSWORD_RESET_REQUEST', entityType: 'user', entityId: user.id, ipAddress: req.ip });
+  }
+  res.json({ message: 'If an account matches that email, a password reset link has been sent.' });
+}));
+
+app.post('/api/auth/reset-password', authLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.resetPasswordSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+  const tokenHash = crypto.createHash('sha256').update(parsed.data.token).digest('hex');
+  const passwordHash = await bcrypt.hash(parsed.data.password, BCRYPT_ROUNDS);
+  const userId = await db.consumePasswordReset(tokenHash, passwordHash);
+  if (!userId) return res.status(400).json({ error: 'Reset link is invalid or expired.' });
+
+  await db.logAudit({ userId, action: 'PASSWORD_RESET_COMPLETE', entityType: 'user', entityId: userId, ipAddress: req.ip });
+  res.json({ message: 'Password updated. You can now sign in with your new password.' });
+}));
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  const csrfToken = ensureCsrfCookie(req, res);
+  res.json({
+    ...safeUserDto(req.user, req.ownerId),
+    csrfToken,
+    demoResetEnabled: process.env.NODE_ENV !== 'production',
+  });
+});
+
+app.patch('/api/auth/profile', requireAuth, wrap(async (req, res) => {
+  const parsed = V.validate(V.profileSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const updated = await db.updateUserProfile(req.user.id, parsed.data);
+  await db.logAudit({ userId: req.user.id, action: 'PROFILE_UPDATE', entityType: 'user', entityId: req.user.id, ipAddress: req.ip });
+  res.json(safeUserDto(updated, req.ownerId));
+}));
+
+app.post('/api/auth/change-password', requireAuth, wrap(async (req, res) => {
+  const parsed = V.validate(V.changePasswordSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const ok = await bcrypt.compare(parsed.data.currentPassword, req.user.passwordHash);
+  if (!ok) return res.status(400).json({ error: 'Current password is incorrect.' });
+  const hash = await bcrypt.hash(parsed.data.newPassword, BCRYPT_ROUNDS);
+  await db.updateUserPassword(req.user.id, hash);
+  await db.logAudit({ userId: req.user.id, action: 'PASSWORD_CHANGE', entityType: 'user', entityId: req.user.id, ipAddress: req.ip });
+  res.json({ ok: true, message: 'Password changed successfully.' });
+}));
+
+app.get('/api/auth/my-data', requireAuth, wrap(async (req, res) => {
+  const payload = await db.exportCustomerData(req.user.id);
+  if (!payload) return res.status(404).json({ error: 'Account not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'DATA_EXPORT', entityType: 'user', entityId: req.user.id, ipAddress: req.ip });
+  res.setHeader('Content-Disposition', 'attachment; filename="casabatangueno-my-data.json"');
+  res.json(payload);
+}));
+
+app.post('/api/auth/delete-account', requireAuth, wrap(async (req, res) => {
+  if (req.user.role !== 'customer') {
+    return res.status(403).json({ error: 'Only customer accounts can be self-deleted here.' });
+  }
+  const parsed = V.validate(V.deleteAccountSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const ok = await bcrypt.compare(parsed.data.password, req.user.passwordHash);
+  if (!ok) return res.status(400).json({ error: 'Incorrect password.' });
+
+  await db.logAudit({ userId: req.user.id, action: 'ACCOUNT_DELETE', entityType: 'user', entityId: req.user.id, ipAddress: req.ip });
+  await db.softDeleteUserAccount(req.user.id);
+  clearSessionCookie(req, res);
+  res.json({ ok: true, message: 'Your account and personal details have been deleted.' });
+}));
+
+// ============================================================
+// PUBLIC ENDPOINTS (NO PERSONAL DATA EXPOSED)
+// ============================================================
+app.get('/api/public/settings', wrap(async (req, res) => {
+  res.json(await db.getSettings());
+}));
+
+app.get('/api/public/properties', wrap(async (req, res) => {
+  res.json(await db.listPublicProperties(req.query));
+}));
+
+app.get('/api/public/properties/:id', wrap(async (req, res) => {
+  const p = await db.getPublicPropertyById(req.params.id);
+  if (!p) return res.status(404).json({ error: 'Property not found.' });
+  await db.recordPropertyView(p.id).catch(() => {});
+  res.json(p);
+}));
+
+app.get('/api/public/properties/:id/reviews', wrap(async (req, res) => {
+  const data = await db.listPropertyReviews(req.params.id);
+  if (!data) return res.status(404).json({ error: 'Property not found.' });
+  res.json(data);
+}));
+
+app.get('/api/public/reviews/latest', wrap(async (req, res) => {
+  const limit = Math.min(12, Math.max(1, Number(req.query.limit) || 6));
+  res.json(await db.listPublicLatestReviews(limit));
+}));
+
+app.get('/api/public/testimonials', wrap(async (req, res) => {
+  res.json(await db.listPublicTestimonials());
+}));
+
+app.get('/api/public/announcements', wrap(async (req, res) => {
+  res.json(await db.listPublicAnnouncements(req.query.propertyId || null));
+}));
+
+app.post('/api/public/applications', publicWriteLimiter, attachOptionalUser, wrap(async (req, res) => {
+  const parsed = V.validate(V.applicationSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+  let doc = null;
+  if (parsed.data.idDocument) {
+    const buf = decodeBase64Payload(parsed.data.idDocument.contentBase64);
+    if (!buf.length || buf.length > MAX_UPLOAD_BYTES) {
+      return res.status(400).json({ error: 'ID document must be 2 MB or smaller.' });
+    }
+    const sig = detectFileSignature(buf, true);
+    if (!sig) {
+      return res.status(400).json({ error: 'ID document must be a valid JPG, PNG, WEBP, or PDF file.' });
+    }
+    doc = {
+      fileName: `${crypto.randomUUID()}.${sig.ext}`,
+      mimeType: sig.mime,
+      fileSize: buf.length,
+      contentBase64: buf.toString('base64'),
+    };
+  }
+
+  const out = await db.createPublicApplication(parsed.data, req.user?.id || null, doc);
+  if (out.error === 'property_not_found') return res.status(404).json({ error: 'Property not found.' });
+  if (out.error === 'duplicate_active') {
+    return res.status(409).json({
+      error: 'You already have an active (Pending, Approved, or Reserved) application for this property.',
+    });
+  }
+
+  await db.logAudit({
+    userId: req.user?.id || null,
+    action: 'APPLICATION_SUBMIT',
+    entityType: 'application',
+    entityId: out.id,
+    details: { referenceNumber: out.referenceNumber, propertyId: parsed.data.propertyId },
+    ipAddress: req.ip,
+  });
+
+  await email.sendApplicationConfirmation({
+    to: parsed.data.email,
+    fullName: parsed.data.fullName,
+    referenceNumber: out.referenceNumber,
+    propertyName: out.propertyName,
+    expectedMoveInDate: parsed.data.expectedMoveInDate,
+  });
+
+  res.status(201).json({
+    referenceNumber: out.referenceNumber,
+    status: out.status,
+    propertyName: out.propertyName,
   });
 }));
 
-// ============================== users (admin) + demo reset ==============================
-app.get('/api/users', auth, allow('admin'), (_q, res) => res.json(s().users.map(publicUser)));
-app.post('/api/users', auth, allow('admin'), asyncSafe((req, res) => {
-  const b = req.body;
-  if (!str(b.fullName) || !/^\S+@\S+\.\S+$/.test(str(b.email)) || String(b.password || '').length < 8) return fail(res, 400, 'Name, valid email and an 8+ character password are required.');
-  if (s().users.some((u) => u.email.toLowerCase() === str(b.email).toLowerCase())) return fail(res, 409, 'Email already in use.');
-  const u = { id: db.nextId('user'), fullName: str(b.fullName), email: str(b.email), passwordHash: bcrypt.hashSync(b.password, 10),
-    role: ['owner', 'admin', 'staff'].includes(b.role) ? b.role : 'staff', phone: str(b.phone), isActive: true, createdAt: new Date().toISOString() };
-  s().users.push(u); db.save(); res.status(201).json(publicUser(u));
+app.post('/api/public/applications/track', publicWriteLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.trackApplicationSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const result = await db.trackPublicApplication(parsed.data.referenceNumber, parsed.data.email);
+  if (!result) return res.status(404).json({ error: 'No matching application found for that reference number and email.' });
+  res.json(result);
 }));
-app.post('/api/demo/reset', auth, OWNER, (_q, res) => { db.reset(); res.json({ ok: true }); });
 
-app.use('/api', (_q, res) => fail(res, 404, 'Unknown API route.'));
+app.post('/api/public/reviews', publicWriteLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.reviewSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.createPublicReview(parsed.data);
+  if (out.error === 'property_not_found') return res.status(404).json({ error: 'Property not found.' });
+  if (out.error === 'duplicate') return res.status(409).json({ error: 'You have already submitted a review for this property.' });
+  res.status(201).json({ message: 'Thanks! Your review has been submitted for approval.', status: 'Pending' });
+}));
+
+app.post('/api/public/testimonials', publicWriteLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.testimonialSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.createPublicTestimonial(parsed.data);
+  res.status(201).json({ id: row.id, message: 'Thank you! Your testimonial is awaiting approval.' });
+}));
+
+app.post('/api/public/contact', publicWriteLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.contactSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  if (parsed.data.website && parsed.data.website.trim()) {
+    // Honeypot triggered: silently succeed without saving spam.
+    return res.status(201).json({ message: 'Message received. Our team will get back to you soon.' });
+  }
+  const msg = await db.createContactMessage(parsed.data);
+  await db.logAudit({ action: 'CONTACT_SUBMIT', entityType: 'contact_message', entityId: msg.id, ipAddress: req.ip });
+  res.status(201).json({ message: 'Message sent! Our Alangilan management office will reply soon.' });
+}));
+
+app.post('/api/public/viewings', publicWriteLimiter, attachOptionalUser, wrap(async (req, res) => {
+  const parsed = V.validate(V.viewingRequestSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  if (parsed.data.website && parsed.data.website.trim()) {
+    return res.status(201).json({ message: 'Viewing request received.' });
+  }
+  const row = await db.createViewingRequest(parsed.data, req.user?.id || null);
+  if (!row) return res.status(404).json({ error: 'Property not found.' });
+  await email.sendViewingConfirmation({
+    to: parsed.data.email,
+    fullName: parsed.data.fullName,
+    propertyName: row.propertyName,
+    preferredDate: parsed.data.preferredDate,
+    preferredTime: parsed.data.preferredTime,
+    status: 'Pending',
+  });
+  res.status(201).json({ message: 'Viewing request submitted! We will confirm your schedule shortly.', id: row.id });
+}));
+
+app.post('/api/public/waitlist', publicWriteLimiter, wrap(async (req, res) => {
+  const parsed = V.validate(V.waitlistSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.joinWaitlist(parsed.data);
+  if (!out) return res.status(404).json({ error: 'Property not found.' });
+  if (out.alreadyWaiting) {
+    return res.json({ message: `You are already on the waitlist for ${out.propertyName}.` });
+  }
+  res.status(201).json({ message: `Added to the waitlist for ${out.propertyName}. We'll email you when a bed opens!` });
+}));
+
+// ============================================================
+// CUSTOMER ACCOUNT PORTAL ROUTES
+// ============================================================
+app.get('/api/customer/favorites', requireAuth, wrap(async (req, res) => {
+  res.json(await db.listCustomerFavorites(req.user.id));
+}));
+
+app.post('/api/customer/favorites/:propertyId', requireAuth, wrap(async (req, res) => {
+  const pid = Number(req.params.propertyId);
+  if (!pid) return res.status(400).json({ error: 'Invalid property.' });
+  res.json(await db.addFavorite(req.user.id, pid));
+}));
+
+app.delete('/api/customer/favorites/:propertyId', requireAuth, wrap(async (req, res) => {
+  const pid = Number(req.params.propertyId);
+  res.json(await db.removeFavorite(req.user.id, pid));
+}));
+
+app.get('/api/customer/applications', requireAuth, wrap(async (req, res) => {
+  res.json(await db.listCustomerApplications(req.user.id, req.user.email));
+}));
+
+app.get('/api/customer/lease', requireAuth, wrap(async (req, res) => {
+  res.json(await db.getCustomerLeaseAndPayments(req.user.id, req.user.email));
+}));
+
+app.get('/api/customer/maintenance', requireAuth, wrap(async (req, res) => {
+  res.json(await db.listCustomerMaintenance(req.user.id));
+}));
+
+app.post('/api/customer/maintenance', requireAuth, wrap(async (req, res) => {
+  const parsed = V.validate(V.maintenanceCreateSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.createMaintenanceRequest(req.user.id, req.user.email, parsed.data);
+  if (out.error === 'no_property') return res.status(400).json({ error: 'Please select a property or have an active lease.' });
+  await db.logAudit({ userId: req.user.id, action: 'MAINTENANCE_CREATE', entityType: 'maintenance', entityId: out.request.id, ipAddress: req.ip });
+  res.status(201).json(out.request);
+}));
+
+app.get('/api/customer/announcements', requireAuth, wrap(async (req, res) => {
+  const leaseData = await db.getCustomerLeaseAndPayments(req.user.id, req.user.email);
+  const activePropId = leaseData.tenants.find((t) => t.status === 'Active')?.propertyId || null;
+  res.json(await db.listPublicAnnouncements(activePropId));
+}));
+
+// ============================================================
+// IMAGE UPLOAD (VERCEL BLOB + MAGIC BYTES)
+// ============================================================
+app.post('/api/uploads/image', requireOwner, wrap(async (req, res) => {
+  const { contentBase64 } = req.body || {};
+  if (!contentBase64) return res.status(400).json({ error: 'Image payload is required.' });
+  const buf = decodeBase64Payload(contentBase64);
+  if (!buf.length || buf.length > MAX_UPLOAD_BYTES) {
+    return res.status(400).json({ error: 'Image must be 2 MB or smaller.' });
+  }
+  const sig = detectFileSignature(buf, false);
+  if (!sig) {
+    return res.status(400).json({ error: 'Only valid JPG, PNG, or WEBP images are allowed.' });
+  }
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return res.status(503).json({
+      error: 'Vercel Blob upload is not configured (set BLOB_READ_WRITE_TOKEN) or enter an /images/... path.',
+    });
+  }
+  const filename = `properties/${crypto.randomUUID()}.${sig.ext}`;
+  const blob = await put(filename, buf, {
+    access: 'public',
+    contentType: sig.mime,
+    token: process.env.BLOB_READ_WRITE_TOKEN,
+  });
+  await db.logAudit({ userId: req.user.id, action: 'IMAGE_UPLOAD', entityType: 'blob', details: { url: blob.url }, ipAddress: req.ip });
+  res.status(201).json({ url: blob.url });
+}));
+
+// ============================================================
+// OWNER / STAFF MANAGEMENT ROUTES (STRICT OWNER_ID SCOPING)
+// ============================================================
+app.get('/api/properties', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listOwnerProperties(req.ownerId));
+}));
+
+app.post('/api/properties', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.propertySchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const ownerId = req.ownerId || 1;
+  const p = await db.createProperty(ownerId, parsed.data);
+  await db.logAudit({ userId: req.user.id, action: 'PROPERTY_CREATE', entityType: 'property', entityId: p.id, ipAddress: req.ip });
+  res.status(201).json(p);
+}));
+
+app.put('/api/properties/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.propertySchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const p = await db.updateProperty(req.ownerId, req.params.id, parsed.data);
+  if (!p) return res.status(404).json({ error: 'Property not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'PROPERTY_UPDATE', entityType: 'property', entityId: p.id, ipAddress: req.ip });
+  res.json(p);
+}));
+
+app.patch('/api/properties/:id/publish', requireAuth, requireOwner, wrap(async (req, res) => {
+  const p = await db.togglePublishProperty(req.ownerId, req.params.id);
+  if (!p) return res.status(404).json({ error: 'Property not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'PROPERTY_PUBLISH_TOGGLE', entityType: 'property', entityId: p.id, details: { isPublished: p.isPublished }, ipAddress: req.ip });
+  res.json(p);
+}));
+
+app.delete('/api/properties/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const out = await db.archiveProperty(req.ownerId, req.params.id);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Property not found.' });
+  if (out.error === 'active_tenants') return res.status(409).json({ error: 'Move out active tenants before archiving this property.' });
+  await db.logAudit({ userId: req.user.id, action: 'PROPERTY_ARCHIVE', entityType: 'property', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Buildings ----------
+app.get('/api/buildings', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listBuildings(req.ownerId));
+}));
+
+app.post('/api/buildings', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.buildingSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.createBuilding(req.ownerId, parsed.data);
+  if (!row) return res.status(404).json({ error: 'Property not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'BUILDING_CREATE', entityType: 'building', entityId: row.id, ipAddress: req.ip });
+  res.status(201).json(row);
+}));
+
+app.put('/api/buildings/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.buildingSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.updateBuilding(req.ownerId, req.params.id, parsed.data);
+  if (!row) return res.status(404).json({ error: 'Building not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'BUILDING_UPDATE', entityType: 'building', entityId: row.id, ipAddress: req.ip });
+  res.json(row);
+}));
+
+app.delete('/api/buildings/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const out = await db.deleteBuilding(req.ownerId, req.params.id);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Building not found.' });
+  if (out.error === 'has_rooms') return res.status(409).json({ error: 'Archive rooms inside this building first.' });
+  await db.logAudit({ userId: req.user.id, action: 'BUILDING_DELETE', entityType: 'building', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Rooms ----------
+app.get('/api/rooms', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listRooms(req.ownerId));
+}));
+
+app.post('/api/rooms', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.roomSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.createRoom(req.ownerId, parsed.data);
+  if (out.error === 'building_not_found') return res.status(404).json({ error: 'Building not found.' });
+  if (out.error === 'duplicate') return res.status(409).json({ error: 'A room with this number already exists in the building.' });
+  await db.logAudit({ userId: req.user.id, action: 'ROOM_CREATE', entityType: 'room', entityId: out.room.id, ipAddress: req.ip });
+  res.status(201).json(out.room);
+}));
+
+app.put('/api/rooms/:id', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.roomSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.updateRoom(req.ownerId, req.params.id, parsed.data);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Room not found.' });
+  if (out.error === 'capacity_low') return res.status(409).json({ error: 'Capacity cannot be less than currently occupied beds.' });
+  await db.logAudit({ userId: req.user.id, action: 'ROOM_UPDATE', entityType: 'room', entityId: out.room.id, ipAddress: req.ip });
+  if (out.bedOpened) await notifyWaitlistForProperty(out.propertyId, out.propertyName, out.room.roomNumber);
+  res.json(out.room);
+}));
+
+app.delete('/api/rooms/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const out = await db.archiveRoom(req.ownerId, req.params.id);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Room not found.' });
+  if (out.error === 'active_tenants') return res.status(409).json({ error: 'Move out active tenants before archiving this room.' });
+  await db.logAudit({ userId: req.user.id, action: 'ROOM_ARCHIVE', entityType: 'room', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Tenants & Leases & Checklists ----------
+app.get('/api/tenants', requireAuth, requireStaff, wrap(async (req, res) => {
+  const list = await db.listTenants(req.ownerId);
+  res.json(list.map((t) => formatTenantForRole(t, req.user.role)));
+}));
+
+app.post('/api/tenants/:id/reveal', requireAuth, requireStaff, wrap(async (req, res) => {
+  const t = await db.getTenantById(req.ownerId, req.params.id);
+  if (!t) return res.status(404).json({ error: 'Tenant not found.' });
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'PII_REVEAL',
+    entityType: 'tenant',
+    entityId: t.id,
+    details: { fields: ['email', 'contactNumber'] },
+    ipAddress: req.ip,
+  });
+  res.json({ id: t.id, email: t.email, contactNumber: t.contactNumber });
+}));
+
+app.post('/api/tenants', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.tenantSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.createTenant(req.ownerId, parsed.data);
+  if (out.error === 'room_not_found') return res.status(404).json({ error: 'Room not found.' });
+  if (out.error === 'maintenance') return res.status(409).json({ error: 'Room is under maintenance.' });
+  if (out.error === 'room_full') return res.status(409).json({ error: 'Room has no available beds left.' });
+  await db.logAudit({ userId: req.user.id, action: 'TENANT_CREATE', entityType: 'tenant', entityId: out.tenant.id, ipAddress: req.ip });
+  res.status(201).json(formatTenantForRole(out.tenant, req.user.role));
+}));
+
+app.put('/api/tenants/:id', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.tenantSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const existing = await db.getTenantById(req.ownerId, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Tenant not found.' });
+  // Staff cannot overwrite masked fields accidentally if left unchanged or blank.
+  const payload = { ...parsed.data };
+  if (req.user.role === 'staff') {
+    payload.email = existing.email;
+    payload.contactNumber = existing.contactNumber;
+    payload.address = existing.address;
+    payload.emergencyContact = existing.emergencyContact;
+    payload.securityDeposit = existing.securityDeposit;
+  }
+  const out = await db.updateTenant(req.ownerId, req.params.id, payload);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Tenant not found.' });
+  if (out.error === 'room_not_found') return res.status(404).json({ error: 'Room not found.' });
+  if (out.error === 'maintenance') return res.status(409).json({ error: 'Room is under maintenance.' });
+  if (out.error === 'room_full') return res.status(409).json({ error: 'Target room has no available beds.' });
+  await db.logAudit({ userId: req.user.id, action: 'TENANT_UPDATE', entityType: 'tenant', entityId: out.tenant.id, ipAddress: req.ip });
+  res.json(formatTenantForRole(out.tenant, req.user.role));
+}));
+
+app.post('/api/tenants/:id/move-out', requireAuth, requireStaff, wrap(async (req, res) => {
+  const out = await db.moveOutTenant(req.ownerId, req.params.id);
+  if (!out) return res.status(404).json({ error: 'Tenant not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'TENANT_MOVE_OUT', entityType: 'tenant', entityId: out.tenantId, ipAddress: req.ip });
+  if (out.bedOpened) await notifyWaitlistForProperty(out.propertyId, out.propertyName, out.roomNumber);
+  res.json(out);
+}));
+
+app.post('/api/tenants/:id/checklist', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.checklistSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const data = { ...parsed.data };
+  if (req.user.role === 'staff') {
+    delete data.depositDeductions;
+    delete data.depositRefunded;
+    delete data.depositRefundedAt;
+  }
+  const out = await db.saveTenantChecklist(req.ownerId, req.params.id, data);
+  if (!out) return res.status(404).json({ error: 'Tenant not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'TENANT_CHECKLIST', entityType: 'tenant', entityId: Number(req.params.id), details: { type: data.type }, ipAddress: req.ip });
+  res.json(out);
+}));
+
+app.delete('/api/tenants/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const out = await db.archiveTenant(req.ownerId, req.params.id);
+  if (!out) return res.status(404).json({ error: 'Tenant not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'TENANT_ARCHIVE', entityType: 'tenant', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+app.get('/api/leases', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listLeases(req.ownerId));
+}));
+
+// ---------- Applications ----------
+app.get('/api/applications', requireAuth, requireStaff, wrap(async (req, res) => {
+  const list = await db.listApplications(req.ownerId);
+  res.json(list.map((a) => formatAppForRole(a, req.user.role)));
+}));
+
+app.post('/api/applications/:id/reveal', requireAuth, requireStaff, wrap(async (req, res) => {
+  const a = await db.getApplicationById(req.ownerId, req.params.id);
+  if (!a) return res.status(404).json({ error: 'Application not found.' });
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'PII_REVEAL',
+    entityType: 'application',
+    entityId: a.id,
+    details: { fields: ['email', 'contactNumber'] },
+    ipAddress: req.ip,
+  });
+  res.json({ id: a.id, email: a.email, contactNumber: a.contactNumber });
+}));
+
+app.get('/api/applications/:id/document', requireAuth, requireOwner, wrap(async (req, res) => {
+  const doc = await db.getApplicationDocument(req.ownerId, req.params.id);
+  if (!doc) return res.status(404).json({ error: 'No ID document attached to this application.' });
+  await db.logAudit({ userId: req.user.id, action: 'APPLICATION_DOC_VIEW', entityType: 'application', entityId: Number(req.params.id), ipAddress: req.ip });
+  const buf = Buffer.from(doc.contentBase64, 'base64');
+  res.setHeader('Content-Type', doc.mimeType);
+  res.setHeader('Content-Disposition', `inline; filename="${doc.fileName}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(buf);
+}));
+
+app.delete('/api/applications/:id/document', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteApplicationDocument(req.ownerId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Document not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'APPLICATION_DOC_DELETE', entityType: 'application', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+app.patch('/api/applications/:id/status', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.applicationStatusSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.updateApplicationStatus(req.ownerId, req.params.id, parsed.data);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Application not found.' });
+  if (out.error === 'room_required') return res.status(400).json({ error: 'Assign a room before approving or reserving.' });
+  if (out.error === 'room_not_found') return res.status(404).json({ error: 'Selected room does not belong to this property.' });
+  if (out.error === 'room_unavailable') return res.status(409).json({ error: 'Room is under maintenance.' });
+  if (out.error === 'insufficient_beds') return res.status(409).json({ error: out.detail || 'Not enough free beds in the assigned room.' });
+
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'APPLICATION_STATUS',
+    entityType: 'application',
+    entityId: Number(req.params.id),
+    details: { status: parsed.data.status, assignedRoomId: parsed.data.assignedRoomId || null },
+    ipAddress: req.ip,
+  });
+
+  await email.sendApplicationStatusEmail({
+    to: out.application.email,
+    fullName: out.application.fullName,
+    referenceNumber: out.application.referenceNumber,
+    propertyName: out.application.propertyName,
+    status: out.application.status,
+    roomNumber: out.application.roomNumber,
+  });
+
+  if (out.bedOpened) {
+    await notifyWaitlistForProperty(out.application.propertyId, out.application.propertyName);
+  }
+  res.json(formatAppForRole(out.application, req.user.role));
+}));
+
+app.post('/api/applications/:id/convert', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.convertApplicationSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.convertApplicationToTenant(req.ownerId, req.params.id, parsed.data);
+  if (out.error === 'not_found') return res.status(404).json({ error: 'Application not found.' });
+  if (out.error === 'already_converted') return res.status(409).json({ error: 'Application already converted to tenant.' });
+  if (out.error === 'no_room') return res.status(400).json({ error: 'Assign an available room first.' });
+  if (out.error === 'maintenance') return res.status(409).json({ error: 'Assigned room is under maintenance.' });
+  if (out.error === 'room_full') return res.status(409).json({ error: 'Assigned room has no free beds.' });
+
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'APPLICATION_CONVERT',
+    entityType: 'tenant',
+    entityId: out.tenant.id,
+    details: { applicationId: Number(req.params.id) },
+    ipAddress: req.ip,
+  });
+  res.status(201).json(formatTenantForRole(out.tenant, req.user.role));
+}));
+
+app.delete('/api/applications/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const out = await db.archiveApplication(req.ownerId, req.params.id);
+  if (!out) return res.status(404).json({ error: 'Application not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'APPLICATION_ARCHIVE', entityType: 'application', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Payments & Installment Transactions ----------
+app.get('/api/payments', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listPayments(req.ownerId));
+}));
+
+app.post('/api/payments', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.paymentCreateSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const out = await db.createPayment(req.ownerId, req.user.id, parsed.data);
+  if (out.error === 'tenant_not_found') return res.status(404).json({ error: 'Tenant not found.' });
+  if (out.error === 'duplicate') return res.status(409).json({ error: 'A payment bill already exists for this tenant and month.' });
+  await db.logAudit({ userId: req.user.id, action: 'PAYMENT_CREATE', entityType: 'payment', entityId: out.payment.id, ipAddress: req.ip });
+  res.status(201).json(out.payment);
+}));
+
+app.post('/api/payments/:id/transactions', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.transactionCreateSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const tx = await db.addPaymentTransaction(req.ownerId, req.params.id, req.user.id, parsed.data);
+  if (!tx) return res.status(404).json({ error: 'Payment bill not found.' });
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'PAYMENT_TX_ADD',
+    entityType: 'payment_transaction',
+    entityId: tx.id,
+    details: { paymentId: Number(req.params.id), amount: tx.amount, method: tx.paymentMethod },
+    ipAddress: req.ip,
+  });
+  res.status(201).json(await db.getPaymentById(req.ownerId, req.params.id));
+}));
+
+app.put('/api/payment-transactions/:txId', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.transactionEditSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const tx = await db.editPaymentTransaction(req.ownerId, req.params.txId, req.user.id, parsed.data);
+  if (!tx) return res.status(404).json({ error: 'Transaction not found or already voided.' });
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'PAYMENT_TX_EDIT',
+    entityType: 'payment_transaction',
+    entityId: tx.id,
+    details: { reason: parsed.data.reason, amount: parsed.data.amount },
+    ipAddress: req.ip,
+  });
+  res.json(tx);
+}));
+
+app.post('/api/payment-transactions/:txId/void', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.transactionVoidSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const tx = await db.voidPaymentTransaction(req.ownerId, req.params.txId, req.user.id, parsed.data.reason);
+  if (!tx) return res.status(404).json({ error: 'Transaction not found or already voided.' });
+  await db.logAudit({
+    userId: req.user.id,
+    action: 'PAYMENT_TX_VOID',
+    entityType: 'payment_transaction',
+    entityId: tx.id,
+    details: { reason: parsed.data.reason },
+    ipAddress: req.ip,
+  });
+  res.json(tx);
+}));
+
+app.delete('/api/payments/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.archivePayment(req.ownerId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Payment bill not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'PAYMENT_ARCHIVE', entityType: 'payment', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Expenses ----------
+app.get('/api/expense-categories', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listExpenseCategories());
+}));
+
+app.get('/api/expenses', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listExpenses(req.ownerId));
+}));
+
+app.post('/api/expenses', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.expenseSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.createExpense(req.ownerId, parsed.data);
+  if (!row) return res.status(404).json({ error: 'Property not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'EXPENSE_CREATE', entityType: 'expense', entityId: row.id, ipAddress: req.ip });
+  res.status(201).json(row);
+}));
+
+app.put('/api/expenses/:id', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.expenseSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.updateExpense(req.ownerId, req.params.id, parsed.data);
+  if (!row) return res.status(404).json({ error: 'Expense not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'EXPENSE_UPDATE', entityType: 'expense', entityId: row.id, ipAddress: req.ip });
+  res.json(row);
+}));
+
+app.delete('/api/expenses/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteExpense(req.ownerId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Expense not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'EXPENSE_DELETE', entityType: 'expense', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Reviews & Testimonials ----------
+app.get('/api/reviews', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listReviews(req.ownerId));
+}));
+
+app.patch('/api/reviews/:id/status', requireAuth, requireStaff, wrap(async (req, res) => {
+  const status = req.body?.status;
+  if (!['Pending', 'Approved', 'Rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+  const r = await db.updateReviewStatus(req.ownerId, req.params.id, status);
+  if (!r) return res.status(404).json({ error: 'Review not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'REVIEW_STATUS', entityType: 'review', entityId: r.id, details: { status }, ipAddress: req.ip });
+  res.json(r);
+}));
+
+app.post('/api/reviews/:id/reply', requireAuth, requireStaff, wrap(async (req, res) => {
+  const reply = String(req.body?.ownerReply || '').trim();
+  if (!reply || reply.length > 600) return res.status(400).json({ error: 'Reply (1–600 chars) is required.' });
+  const r = await db.replyReview(req.ownerId, req.params.id, reply);
+  if (!r) return res.status(404).json({ error: 'Review not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'REVIEW_REPLY', entityType: 'review', entityId: r.id, ipAddress: req.ip });
+  res.json(r);
+}));
+
+app.delete('/api/reviews/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteReview(req.ownerId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Review not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'REVIEW_DELETE', entityType: 'review', entityId: Number(req.params.id), ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+app.get('/api/testimonials', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listTestimonials(req.ownerId));
+}));
+
+app.patch('/api/testimonials/:id/status', requireAuth, requireOwner, wrap(async (req, res) => {
+  const status = req.body?.status;
+  if (!['Pending', 'Approved', 'Rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+  const t = await db.updateTestimonialStatus(req.params.id, status);
+  if (!t) return res.status(404).json({ error: 'Testimonial not found.' });
+  res.json(t);
+}));
+
+app.delete('/api/testimonials/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteTestimonial(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Testimonial not found.' });
+  res.json({ ok: true });
+}));
+
+// ---------- Inbox: Messages, Viewings, Waitlist, Maintenance, Announcements ----------
+app.get('/api/messages', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listMessages());
+}));
+
+app.patch('/api/messages/:id/status', requireAuth, requireStaff, wrap(async (req, res) => {
+  const status = req.body?.status;
+  if (!['New', 'Read', 'Replied'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+  const m = await db.updateMessageStatus(req.params.id, status);
+  if (!m) return res.status(404).json({ error: 'Message not found.' });
+  res.json(m);
+}));
+
+app.delete('/api/messages/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteMessage(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Message not found.' });
+  res.json({ ok: true });
+}));
+
+app.get('/api/viewings', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listViewingRequests(req.ownerId));
+}));
+
+app.patch('/api/viewings/:id/status', requireAuth, requireStaff, wrap(async (req, res) => {
+  const status = req.body?.status;
+  if (!['Pending', 'Confirmed', 'Completed', 'Cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+  const v = await db.updateViewingStatus(req.ownerId, req.params.id, status);
+  if (!v) return res.status(404).json({ error: 'Viewing request not found.' });
+  await email.sendViewingConfirmation({
+    to: v.email,
+    fullName: v.fullName,
+    propertyName: v.propertyName,
+    preferredDate: v.preferredDate,
+    preferredTime: v.preferredTime,
+    status,
+  });
+  res.json(v);
+}));
+
+app.get('/api/waitlist', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listWaitlist(req.ownerId));
+}));
+
+app.get('/api/maintenance', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listOwnerMaintenance(req.ownerId));
+}));
+
+app.patch('/api/maintenance/:id', requireAuth, requireStaff, wrap(async (req, res) => {
+  const parsed = V.validate(V.maintenanceUpdateSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const m = await db.updateMaintenanceRequest(req.ownerId, req.params.id, parsed.data);
+  if (!m) return res.status(404).json({ error: 'Maintenance request not found.' });
+  await db.logAudit({ userId: req.user.id, action: 'MAINTENANCE_UPDATE', entityType: 'maintenance', entityId: m.id, details: { status: m.status }, ipAddress: req.ip });
+  res.json(m);
+}));
+
+app.get('/api/announcements', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.listOwnerAnnouncements(req.ownerId));
+}));
+
+app.post('/api/announcements', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.announcementSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const row = await db.createAnnouncement(req.ownerId || 1, parsed.data);
+  res.status(201).json(row);
+}));
+
+app.delete('/api/announcements/:id', requireAuth, requireOwner, wrap(async (req, res) => {
+  const ok = await db.deleteAnnouncement(req.ownerId, req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Announcement not found.' });
+  res.json({ ok: true });
+}));
+
+// ---------- Notifications, Settings, Audit Logs, Users ----------
+app.get('/api/notifications', requireAuth, wrap(async (req, res) => {
+  res.json(await db.listNotifications(req.user.id));
+}));
+
+app.patch('/api/notifications/:id/read', requireAuth, wrap(async (req, res) => {
+  res.json(await db.markNotificationRead(req.user.id, req.params.id));
+}));
+
+app.get('/api/settings', requireAuth, requireOwner, wrap(async (req, res) => {
+  res.json(await db.getSettings());
+}));
+
+app.put('/api/settings', requireAuth, requireOwner, wrap(async (req, res) => {
+  const parsed = V.validate(V.settingsSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const updated = await db.updateSettings(parsed.data);
+  await db.logAudit({ userId: req.user.id, action: 'SETTINGS_UPDATE', entityType: 'site_settings', ipAddress: req.ip });
+  res.json(updated);
+}));
+
+app.get('/api/audit-logs', requireAuth, requireOwner, wrap(async (req, res) => {
+  const limit = Math.min(300, Math.max(10, Number(req.query.limit) || 100));
+  res.json(await db.listAuditLogs(req.ownerId, limit));
+}));
+
+app.get('/api/users', requireAuth, requireAdmin, wrap(async (req, res) => {
+  const users = await db.listUsers();
+  res.json(users.map((u) => safeUserDto(u)));
+}));
+
+app.post('/api/users', requireAuth, requireAdmin, wrap(async (req, res) => {
+  const parsed = V.validate(V.userCreateSchema, req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  if (await db.findUserByEmail(parsed.data.email)) {
+    return res.status(409).json({ error: 'Email already exists.' });
+  }
+  const passwordHash = await bcrypt.hash(parsed.data.password, BCRYPT_ROUNDS);
+  const created = await db.createUser({
+    ...parsed.data,
+    passwordHash,
+    ownerId: parsed.data.role === 'staff' ? 1 : null,
+  });
+  await db.logAudit({ userId: req.user.id, action: 'USER_CREATE', entityType: 'user', entityId: created.id, details: { role: created.role }, ipAddress: req.ip });
+  res.status(201).json(safeUserDto(created));
+}));
+
+// ---------- Dashboard & Financial Reports ----------
+app.get('/api/dashboard/summary', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.getDashboardSummary(req.ownerId, getDateRange(req.query)));
+}));
+
+app.get('/api/reports/financial', requireAuth, requireStaff, wrap(async (req, res) => {
+  res.json(await db.getFinancialReport(req.ownerId, getDateRange(req.query)));
+}));
+
+// ---------- Demo Reset (DISABLED IN PRODUCTION) ----------
+app.post('/api/demo/reset', requireAuth, requireOwner, wrap(async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Demo reset is disabled in production.' });
+  }
+  if (db.isPostgres()) {
+    return res.status(400).json({ error: 'Postgres database should only be seeded via CLI scripts (npm run db:seed).' });
+  }
+  await db.resetDemo();
+  await db.logAudit({ userId: req.user.id, action: 'DEMO_RESET', entityType: 'system', ipAddress: req.ip });
+  res.json({ ok: true });
+}));
+
+// ---------- Daily Scheduled Job (Vercel Cron) ----------
+app.get('/api/cron/daily', wrap(async (req, res) => {
+  const expected = process.env.CRON_SECRET;
+  const authHdr = req.get('authorization') || '';
+  const provided = authHdr.startsWith('Bearer ') ? authHdr.slice(7).trim() : req.get('x-cron-secret') || '';
+  if (!expected || provided !== expected) {
+    return res.status(401).json({ error: 'Unauthorized cron invocation.' });
+  }
+
+  const out = await db.runDailyCron();
+  await Promise.all([
+    ...out.upcomingReminders.map((r) => email.sendRentReminderEmail(r)),
+    ...out.overdueReminders.map((r) => email.sendRentReminderEmail(r)),
+    ...out.freedProperties.map((p) => notifyWaitlistForProperty(p.propertyId, p.propertyName)),
+  ]);
+
+  await db.logAudit({
+    action: 'CRON_DAILY',
+    entityType: 'system',
+    details: {
+      expiredReservations: out.expiredReservations,
+      upcomingSent: out.upcomingReminders.length,
+      overdueSent: out.overdueReminders.length,
+      leaseAlertsCreated: out.leaseAlertsCreated,
+    },
+    ipAddress: req.ip,
+  });
+
+  res.json({
+    ok: true,
+    expiredReservations: out.expiredReservations,
+    upcomingReminders: out.upcomingReminders.length,
+    overdueReminders: out.overdueReminders.length,
+    leaseAlertsCreated: out.leaseAlertsCreated,
+  });
+}));
+
+// ============================================================
+// STATIC FILES, 404 & ERROR HANDLER
+// ============================================================
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'API endpoint not found.' });
+});
+
+const publicDir = path.join(__dirname, '..', 'public');
+app.use(express.static(publicDir, { extensions: ['html'] }));
+
+app.use((req, res) => {
+  if (req.accepts('html')) {
+    return res.status(404).sendFile(path.join(publicDir, '404.html'));
+  }
+  res.status(404).json({ error: 'Not found.' });
+});
+
+app.use((err, req, res, _next) => {
+  if (err && err.message === 'Origin not allowed by CORS') {
+    return res.status(403).json({ error: 'Cross-origin request blocked.' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request payload is too large (max 4 MB).' });
+  }
+  console.error('[server error]', err?.message || err);
+  res.status(500).json({ error: 'An unexpected server error occurred.' });
+});
+
 module.exports = app;
+module.exports.getJwtSecret = getJwtSecret;

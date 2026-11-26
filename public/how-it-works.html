@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How it Works — CasaBatangueño</title>
-<meta name="description" content="Learn the step-by-step rental application, reservation, contract, deposit, and monthly payment process at CasaBatangueño.">
+<title>How it Works &amp; Application Tracker — CasaBatangueño</title>
+<meta name="description" content="Learn the 6-step rental process, track your application status, check move-in requirements, and browse answers to common resident questions.">
+<meta property="og:title" content="How it Works — CasaBatangueño">
+<meta property="og:description" content="Step-by-step rental flow, application tracker, and resident guide for Alangilan apartments and dormitories.">
+<meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/style.css"><link rel="stylesheet" href="/css/public.css">
@@ -13,48 +16,92 @@
 
 <section class="page-head"><div class="container">
   <h1>How Renting Works</h1>
-  <p>A clear, predictable 6-step journey from your first online application to monthly receipts.</p>
+  <p>A clear 6-step journey from online application to move-in day—plus instant application tracking.</p>
 </div></section>
 
-<section class="section"><div class="container">
-  <h2>The 6-Step Move-In Flow</h2>
-  <p class="sub">Apply → Review → Reserve → Contract &amp; Deposit → Move In → Monthly Payment &amp; Receipts</p>
-  <div class="steps">
-    <div class="step"><b>1</b><h3>Apply Online</h3><p class="muted">Choose a property on <a href="/rentals.html">Find a Rental</a>, submit your contact details and target move-in date, and get an instant reference number (<code>APP-YYYY-XXXX</code>).</p></div>
-    <div class="step"><b>2</b><h3>Owner Review</h3><p class="muted">Our Alangilan management team verifies room/bed availability within 24 hours and matches you with an open unit or schedules an ocular visit.</p></div>
-    <div class="step"><b>3</b><h3>Reserve Your Room</h3><p class="muted">Once approved, settle the reservation fee (₱1,000–₱3,500 depending on unit type) to lock your room for up to 7 days. Reservation fees are credited toward move-in.</p></div>
-    <div class="step"><b>4</b><h3>Contract &amp; Deposit</h3><p class="muted">Review and sign the lease agreement, then settle 1 month advance rent plus 1–2 months refundable security deposit before move-in day.</p></div>
-    <div class="step"><b>5</b><h3>Move In</h3><p class="muted">Complete the room inventory checklist with our caretaker, receive your keys/keycard, and connect to building high-speed fiber Wi-Fi.</p></div>
-    <div class="step"><b>6</b><h3>Monthly Payment &amp; Receipts</h3><p class="muted">Pay monthly rent and sub-metered utility bills on or before the 5th via Cash, GCash, Maya, or Bank Transfer and receive an official digital receipt.</p></div>
+<section class="section" id="track"><div class="container">
+  <div class="about-grid">
+    <div class="panel-card">
+      <h2>Track My Application</h2>
+      <p class="muted">Enter your reference number (e.g. <code>APP-2026-1001</code>) and the email you used when applying. Only your status and assigned property are shown.</p>
+      <form id="trackForm">
+        <div class="grid2">
+          <div class="field"><label for="trRef">Reference number *</label><input id="trRef" name="referenceNumber" required placeholder="APP-2026-1001"></div>
+          <div class="field"><label for="trEmail">Email address *</label><input id="trEmail" name="email" type="email" required placeholder="you@example.com"></div>
+        </div>
+        <button class="btn" type="submit">Check status</button>
+      </form>
+      <div id="trackResult"></div>
+    </div>
+    <div class="panel-card">
+      <h2>Site Navigation Guide</h2>
+      <ul class="contact-list">
+        <li><b><a href="/rentals.html">Find a Rental</a>:</b> Filter by price, room type, beds, and BatStateU distance, compare up to 3 listings, or join a waitlist if full.</li>
+        <li><b><a href="/contact.html#viewing">Book a Viewing</a>:</b> Schedule an on-site visit in Alangilan before reserving.</li>
+        <li><b><a href="/account.html">My Account</a>:</b> Save favorites, track applications, view lease terms, print receipts, and submit maintenance requests.</li>
+      </ul>
+    </div>
   </div>
 </div></section>
 
 <section class="section alt"><div class="container">
+  <h2>The 6-Step Move-In Flow</h2>
+  <p class="sub">Apply → Review → Reserve → Contract &amp; Deposit → Move In → Monthly Payment &amp; Receipts</p>
+  <div class="steps">
+    <div class="step"><b>1</b><h3>Apply Online</h3><p class="muted">Choose a property on <a href="/rentals.html">Find a Rental</a>, submit your contact details and target move-in date, and get an instant reference number (<code>APP-YYYY-XXXX</code>).</p></div>
+    <div class="step"><b>2</b><h3>Owner Review</h3><p class="muted">Our Alangilan management team verifies bed availability within 24 hours and assigns your room or confirms an ocular visit.</p></div>
+    <div class="step"><b>3</b><h3>Reserve Your Bed</h3><p class="muted">Once approved, your bed is held for 7 days. Settle the reservation fee (credited 100% toward your move-in payment).</p></div>
+    <div class="step"><b>4</b><h3>Contract &amp; Deposit</h3><p class="muted">Sign the lease agreement and settle 1 month advance rent plus refundable security deposit prior to move-in.</p></div>
+    <div class="step"><b>5</b><h3>Move In</h3><p class="muted">Complete the room inventory and meter reading checklist with our caretaker and receive your keys.</p></div>
+    <div class="step"><b>6</b><h3>Monthly Billing</h3><p class="muted">Pay rent in full or installments via Cash, GCash, Maya, or Bank Transfer and download official receipts.</p></div>
+  </div>
+</div></section>
+
+<section class="section"><div class="container">
   <div class="about-grid">
     <div class="panel-card">
       <h2>Move-In Requirements</h2>
-      <p class="muted">Prepare these documents prior to contract signing so your move-in takes less than 15 minutes:</p>
+      <p class="muted">Prepare these documents prior to contract signing so your check-in takes less than 15 minutes:</p>
       <ul>
-        <li><b>Valid Government ID, Student ID, or Company ID</b> (plus 1 photocopy for building security).</li>
+        <li><b>Valid Government ID, Student ID, or Company ID</b> (you may optionally upload a private copy when applying).</li>
         <li><b>Signed Lease / Dormitory House Rules Agreement</b> (parent/guardian co-signature for minors).</li>
         <li><b>Emergency Contact Information</b> (name, relationship, and active mobile number).</li>
         <li><b>Move-in Settlement</b>: 1 month advance rent + security deposit (less paid reservation fee).</li>
       </ul>
     </div>
     <div class="panel-card">
-      <h2>Reservation &amp; Payment Channels</h2>
-      <p class="muted">We record every payment in our portal and issue a printable official receipt (<code>RCPT-YYYY-XXXX</code>).</p>
+      <h2>Accepted Payment Channels</h2>
+      <p class="muted">Every installment or full rent payment generates a verifiable receipt number (<code>RCPT-YYYY-XXXX</code>).</p>
       <div class="tags" style="margin:10px 0 14px">
         <span class="badge b-ok">Cash (On-site Office)</span>
         <span class="badge b-info">GCash</span>
         <span class="badge b-info">Maya</span>
         <span class="badge b-info">Bank Transfer</span>
       </div>
-      <p class="muted">Always include your application reference number or tenant name on transfer notes and keep your screenshot until confirmed.</p>
+      <p class="muted">Always include your application reference number or tenant name in transfer notes.</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
         <a class="btn" href="/rentals.html">Browse available rooms</a>
-        <a class="btn ghost" href="/about.html#faq">Read full FAQ</a>
+        <a class="btn ghost" href="/contact.html">Contact our office</a>
       </div>
+    </div>
+  </div>
+</div></section>
+
+<section class="section alt" id="faq"><div class="container">
+  <h2>Quick Answers</h2>
+  <p class="sub">Common questions about reservations, sub-metering, and waitlists.</p>
+  <div class="faq-list">
+    <div class="faq-item">
+      <button class="faq-q" type="button" aria-expanded="true">What happens if my preferred dorm is currently full?<span>−</span></button>
+      <div class="faq-a">Open the property details modal and click <b>Join waitlist</b>. Whenever a resident moves out or a reservation expires, waitlisted applicants are automatically notified by email.</div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q" type="button" aria-expanded="false">How long does an approved reservation hold a bed?<span>+</span></button>
+      <div class="faq-a" hidden>Approved and reserved applications hold the exact number of beds requested for 7 calendar days (Asia/Manila time). Unconverted reservations automatically expire to reopen beds for other applicants.</div>
+    </div>
+    <div class="faq-item">
+      <button class="faq-q" type="button" aria-expanded="false">Can I pay my monthly rent in partial installments?<span>+</span></button>
+      <div class="faq-a" hidden>Yes. Partial payments via GCash, Maya, Bank Transfer, or Cash are logged against your monthly bill, and your remaining balance updates immediately.</div>
     </div>
   </div>
 </div></section>
@@ -63,4 +110,5 @@
 
 <script src="/js/common.js"></script>
 <script src="/js/layout.js"></script>
+<script src="/js/how-it-works.js"></script>
 </body></html>

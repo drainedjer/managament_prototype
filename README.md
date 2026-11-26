@@ -1,74 +1,132 @@
-CasaBatangueño — Apartment & Dormitory Rental Management System
+# CasaBatangueño
 
-Public pages (shared nav & footer via public/js/layout.js)
+Apartment and dormitory rental management platform for **Alangilan, Batangas City** (near Batangas State University Alangilan Campus), built with Express 4, plain HTML/CSS/vanilla JS, **Neon Postgres**, **Vercel Blob**, **Resend**, and **Vercel Cron** on **Vercel Hobby (free tier)**.
 
-- / (index.html) — Home: hero with quick search, Alangilan highlights, featured top 3 properties, How it Works teaser, and latest approved reviews.
-- /rentals.html — Find a Rental: search & filters, property cards with star ratings, interactive Leaflet + OpenStreetMap map, property details modal (info grid, room availability, online application, and tenant reviews).
-- /how-it-works.html — How it Works: expanded 6-step process (Apply → Review → Reserve → Contract & Deposit → Move In → Monthly Payment & Receipts), requirements, and payment methods.
-- /about.html — About / FAQ: management profile, mission, why Alangilan, and interactive FAQ accordion.
-- /contact.html — Contact: office hours, phone/email/address, contact form, and embedded Leaflet map.
-- /owner.html — Owner portal: JWT login with roles (owner, admin, staff), dashboard KPIs (including pending reviews & new messages), 6 Chart.js charts with date filters, CRUD for properties, buildings, rooms, tenants, applications, reviews moderation & replies, contact messages inbox, payments (with printable receipts), expenses, and financial reports with Print / PDF / Excel export.
+---
 
-Stack: HTML5, CSS3, vanilla JavaScript (frontend) · Node.js + Express (backend) · bcryptjs + jsonwebtoken (security) · Chart.js, Leaflet, jsPDF, SheetJS (loaded from CDN).
+## Stack & Free-Tier Architecture
 
-Run locally
+- **Hosting**: Vercel Hobby serverless functions (`api/index.js` -> `server/app.js`, rewrites in `vercel.json`)
+- **Database**: Neon Postgres (`pg` driver reading `DATABASE_URL` pooled connection string)
+- **Image Storage**: Vercel Blob (`@vercel/blob` using `BLOB_READ_WRITE_TOKEN`)
+- **Transactional Email**: Resend (`RESEND_API_KEY`, optional — safely skipped when unset)
+- **Scheduled Jobs**: Vercel Cron daily at `00:00 UTC` (`/api/cron/daily`, protected by `CRON_SECRET`)
+- **Security**: `helmet` CSP, `express-rate-limit`, `cors` allowlist, `zod` validation, `bcrypt` (cost 12), 5-attempt / 15-minute account lockout, `httpOnly` `SameSite` session cookies + double-submit `X-CSRF-Token` protection, staff PII masking with audited reveal, RA 10173 consent & data export/deletion, and private owner-only applicant ID documents.
 
-Requirements: Git Bash and Node.js
+---
 
-To run this code locally, open the terminal in the project folder and type:
+## Environment Variables
 
+Copy `.env.example` to `.env` for local development (never commit `.env`):
+
+```env
+DATABASE_URL=
+JWT_SECRET=
+BLOB_READ_WRITE_TOKEN=
+RESEND_API_KEY=
+EMAIL_FROM=CasaBatangueño <onboarding@resend.dev>
+CRON_SECRET=
+ALLOWED_ORIGINS=
+NODE_ENV=development
+```
+
+- `JWT_SECRET` is **required** in `NODE_ENV=production` or on Vercel (`VERCEL` env set). The server refuses to start if missing.
+- `DATABASE_URL` is **required** in `NODE_ENV=production` or on Vercel. For non-production local preview/tests without `DATABASE_URL`, an ephemeral in-memory store (`server/db-mem.js`) is used automatically.
+
+---
+
+## Database Setup (Neon Postgres)
+
+### Staging vs. Production Branches
+Use Neon's free branching feature:
+1. Create a **`production`** Neon branch and attach its pooled `DATABASE_URL` to Vercel Production environment variables.
+2. Create a **`staging`** / **`preview`** Neon branch for Vercel Preview deployments so test changes never touch live data.
+
+### Initialize Schema & Seed Once
+Run these one-time CLI commands against your target `DATABASE_URL`:
+
+```bash
 npm install
-npm start
+npm run db:init
+npm run db:seed
+```
 
-(If cloning from GitHub for the first time, run git clone <your-repo-url> and cd <project-folder> first; once dependencies are installed, just type npm start.)
+Seed data is **never** automatically executed on application cold start in Postgres mode. Contact the project administrator out-of-band for initial management credentials and change passwords immediately after first login.
 
-Customer portal: http://localhost:3000
-Owner portal: http://localhost:3000/owner.html
+---
 
-Optional: create a .env file in the root folder to override PORT (defaults to 3000) or JWT_SECRET.
+## Local Development & Testing
 
-Demo accounts
+```bash
+# Run syntax & lint checks
+npm run build
+npm run lint
 
-Owner: owner@casa-bat.com / Owner123!
-Admin: admin@casa-bat.com / Admin123!
-Staff: staff@casa-bat.com / Staff123!
+# Run automated API & security tests (Node built-in test runner + supertest)
+npm test
 
-Important seed data note:
-"Reset demo data" in the owner portal top bar restores server/seed.json. If you pulled updates or edited server/seed.json locally and still see old data, you MUST delete server/data/store.json and restart npm start (or npm run dev) so the server regenerates store.json from the updated seed.json.
+# Start local dev server on http://localhost:3000
+npm run dev
 
-Folder structure
+# Or test full Vercel serverless environment locally
+npx vercel dev
+```
 
-server/app.js      Express app: auth, public API, reviews, contact messages, dashboard, CRUD, reports
-server/server.js   Starts the server (npm start)
-server/db.js       Data layer (JSON file) — the only file that touches storage
-server/seed.json   Demo data (including properties, reviews, messages); live data is written to server/data/store.json
-public/            index.html, rentals.html, how-it-works.html, about.html, contact.html, owner.html, css/, js/, images/
-public/js/         common.js, layout.js, properties.js, home.js, rentals.js, about.js, contact.js, owner.js
-api/index.js       Vercel serverless entry (re-uses server/app.js)
-database/          schema.sql + seed.sql: MySQL design for XAMPP/phpMyAdmin (includes reviews and contact_messages tables)
+---
 
-API (Bearer token for everything except /public and /auth/login)
+## Deploying to Vercel (Free Tier)
 
-GET /api/health
+1. Push repository to GitHub and import into Vercel.
+2. Connect **Neon Postgres** and **Vercel Blob** from the Vercel Storage / Marketplace tab.
+3. Set `JWT_SECRET`, `CRON_SECRET`, `ALLOWED_ORIGINS` (your Vercel domain), and optionally `RESEND_API_KEY` + `EMAIL_FROM` in Vercel Project Settings -> Environment Variables.
+4. Run `npm run db:init` and `npm run db:seed` against your Neon database URL once.
+5. Deploy. Verify `GET /api/health` returns `{"ok":true,"db":"postgres"}`.
 
-Public endpoints:
-GET /api/public/properties · GET /api/public/properties/:id
-POST /api/public/applications
-GET /api/public/reviews/latest · GET /api/public/properties/:id/reviews · POST /api/public/reviews
-POST /api/public/contact
+---
 
-Auth:
-POST /api/auth/login · GET /api/auth/me
+## Key Pages
 
-Protected owner/admin/staff endpoints:
-GET /api/dashboard/summary?range=today|week|month|year|all|custom&start&end
-/api/properties · /api/buildings · /api/rooms · /api/tenants (POST /:id/move-out)
-/api/applications (PATCH /:id/status, POST /:id/convert)
-/api/reviews (GET, PATCH /:id/status, POST /:id/reply, DELETE /:id owner/admin)
-/api/messages (GET, PATCH /:id/status, DELETE /:id owner/admin)
-/api/payments · /api/expenses
-GET /api/reports/financial · /api/users (admin) · POST /api/demo/reset
+- `/` — Home (hero search, highlights, featured rentals, resident reviews & testimonials)
+- `/rentals.html` — Search, filter, compare 2–3 properties, favorites, and numbered MarkerCluster map
+- `/how-it-works.html` — 6-step timeline, **Track My Application**, requirements, and FAQ
+- `/contact.html` — Contact office form (honeypot + RA 10173 consent), OSM map, and **Book a Viewing**
+- `/about.html` — Management background & full FAQ
+- `/account.html` — Customer Portal (register, login, forgot/reset password, favorites, applications, lease/receipts, maintenance, announcements, download/delete data)
+- `/owner.html` — Owner & Staff Management Portal
+- `/privacy.html` & `/terms.html` — RA 10173 Privacy Policy and Terms of Service
 
-Using MySQL instead
+---
 
-database/schema.sql and database/seed.sql are ready to import in phpMyAdmin. To switch, replace the functions in server/db.js / the s() calls in server/app.js with mysql2/promise queries (parameterised ? placeholders).
+## API Overview
+
+### Public & Auth
+- `GET /api/health` — Database connectivity health check
+- `GET /api/auth/csrf` — Issues double-submit CSRF cookie/token
+- `POST /api/auth/register` — Customer registration (RA 10173 consent required)
+- `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+- `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`
+- `PATCH /api/auth/profile`, `POST /api/auth/change-password`, `GET /api/auth/my-data`, `POST /api/auth/delete-account`
+- `GET /api/public/settings`, `GET /api/public/properties`, `GET /api/public/properties/:id`
+- `GET /api/public/properties/:id/reviews`, `GET /api/public/reviews/latest`, `GET /api/public/testimonials`, `GET /api/public/announcements`
+- `POST /api/public/applications`, `POST /api/public/applications/track`, `POST /api/public/reviews`, `POST /api/public/testimonials`, `POST /api/public/contact`, `POST /api/public/viewings`, `POST /api/public/waitlist`
+
+### Customer Portal (`/api/customer/*`)
+- `GET|POST|DELETE /api/customer/favorites/:propertyId`
+- `GET /api/customer/applications`, `GET /api/customer/lease`
+- `GET|POST /api/customer/maintenance`, `GET /api/customer/announcements`
+
+### Management Portal (Owner / Staff / Admin)
+- `GET|POST /api/properties`, `PUT|PATCH|DELETE /api/properties/:id`
+- `GET|POST /api/buildings`, `PUT|DELETE /api/buildings/:id`
+- `GET|POST /api/rooms`, `PUT|DELETE /api/rooms/:id`
+- `GET|POST /api/tenants`, `PUT|DELETE /api/tenants/:id`, `POST /api/tenants/:id/reveal`, `POST /api/tenants/:id/move-out`, `POST /api/tenants/:id/checklist`, `GET /api/leases`
+- `GET /api/applications`, `PATCH /api/applications/:id/status`, `POST /api/applications/:id/convert`, `POST /api/applications/:id/reveal`, `GET|DELETE /api/applications/:id/document`, `DELETE /api/applications/:id`
+- `GET|POST /api/payments`, `DELETE /api/payments/:id`, `POST /api/payments/:id/transactions`, `PUT /api/payment-transactions/:txId`, `POST /api/payment-transactions/:txId/void`
+- `GET /api/expense-categories`, `GET|POST /api/expenses`, `PUT|DELETE /api/expenses/:id`
+- `GET /api/reviews`, `PATCH /api/reviews/:id/status`, `POST /api/reviews/:id/reply`, `DELETE /api/reviews/:id`
+- `GET /api/testimonials`, `PATCH|DELETE /api/testimonials/:id`
+- `GET /api/messages`, `PATCH|DELETE /api/messages/:id`, `GET /api/viewings`, `PATCH /api/viewings/:id/status`, `GET /api/waitlist`
+- `GET /api/maintenance`, `PATCH /api/maintenance/:id`, `GET|POST /api/announcements`, `DELETE /api/announcements/:id`
+- `GET /api/notifications`, `PATCH /api/notifications/:id/read`, `GET|PUT /api/settings`, `GET /api/audit-logs`, `GET|POST /api/users`
+- `GET /api/dashboard/summary`, `GET /api/reports/financial`, `POST /api/uploads/image`
+- `GET /api/cron/daily` (requires `Authorization: Bearer <CRON_SECRET>`)

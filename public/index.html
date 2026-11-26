@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CasaBatangueño — Apartment & Dormitory Rentals in Alangilan, Batangas City</title>
-<meta name="description" content="Browse verified apartments and dormitories in Alangilan, Batangas City, read tenant reviews, view locations on a map, and apply online.">
+<title>CasaBatangueño — Apartment &amp; Dormitory Rentals in Alangilan, Batangas City</title>
+<meta name="description" content="Browse verified apartments and dormitories in Alangilan, Batangas City near BatStateU, read tenant reviews, compare listings on a map, and apply online.">
+<meta property="og:title" content="CasaBatangueño — Apartment &amp; Dormitory Rentals in Alangilan, Batangas City">
+<meta property="og:description" content="Verified dormitories, apartments, and private rooms across Alangilan, Batangas City with transparent terms and online applications.">
+<meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -16,7 +19,7 @@
   <h1>Find an apartment or dorm in Alangilan that feels like home.</h1>
   <p>Verified dormitories, apartments, and private rooms across Alangilan, Batangas City—complete with transparent policies, real tenant reviews, and instant online applications.</p>
   <form class="search hero-search" id="quickSearch" autocomplete="off">
-    <div class="field"><label for="hq">Location or property name</label><input id="hq" name="q" placeholder="Golden Country Homes, Neptune St., Highway…"></div>
+    <div class="field"><label for="hq">Location or property name</label><input id="hq" name="q" placeholder="Golden Country Homes, Neptune St., BatStateU…"></div>
     <div class="field"><label for="htype">Rental type</label><select id="htype" name="type"><option value="">Any type</option>
       <option>Apartment</option><option>Dormitory</option><option>Boarding House</option><option>Studio Unit</option><option>Shared Room</option><option>Private Room</option></select></div>
     <button type="submit" class="btn">Search rentals</button>
@@ -24,6 +27,7 @@
   <div class="hero-actions">
     <a class="btn" href="/rentals.html">Browse all rentals</a>
     <a class="hero-link" href="/how-it-works.html">How it works →</a>
+    <a class="hero-link" href="/how-it-works.html#track">Track my application →</a>
   </div>
 </div></section>
 
@@ -31,9 +35,9 @@
   <h2>Built for students, professionals, and Alangilan residents</h2>
   <p class="sub">Every listing is directly managed in Alangilan, Batangas City—no hidden broker fees or guesswork.</p>
   <div class="highlights">
-    <div class="highlight"><h3>Convenient Alangilan Access</h3><p class="muted">Minutes on foot to Jose P. Laurel National Highway, Alfamart, local eateries, and jeepney routes.</p></div>
-    <div class="highlight"><h3>Transparent Terms</h3><p class="muted">Clear deposit rules, sub-metered utility breakdowns, inclusions, and house policies upfront.</p></div>
-    <div class="highlight"><h3>Digital Receipts & Support</h3><p class="muted">Pay via Cash, GCash, Maya, or Bank Transfer and get verified official receipts every billing cycle.</p></div>
+    <div class="highlight"><h3>Near BatStateU Alangilan</h3><p class="muted">Clear walking and tricycle minutes to Batangas State University Alangilan Campus, Alfamart, and jeepney routes.</p></div>
+    <div class="highlight"><h3>Transparent Terms</h3><p class="muted">Clear deposit rules, sub-metered utility breakdowns, inclusions, minimum lease terms, and house policies upfront.</p></div>
+    <div class="highlight"><h3>Digital Receipts &amp; Portal</h3><p class="muted">Track your application online, pay via Cash, GCash, Maya, or Bank Transfer, and view official receipts anytime.</p></div>
   </div>
 </div></section>
 
@@ -51,9 +55,9 @@
     <a class="btn ghost" href="/how-it-works.html">Read full guide →</a>
   </div>
   <div class="steps">
-    <div class="step"><b>1</b><h3>Search & Compare</h3><p class="muted">Filter by budget, room type, beds needed, and location in Alangilan, Batangas City.</p></div>
-    <div class="step"><b>2</b><h3>Apply & Reserve</h3><p class="muted">Submit your online application, get an instant reference number, and lock in your assigned room.</p></div>
-    <div class="step"><b>3</b><h3>Sign & Move In</h3><p class="muted">Settle your contract, advance, and deposit, receive your keys, and track monthly receipts.</p></div>
+    <div class="step"><b>1</b><h3>Search &amp; Compare</h3><p class="muted">Filter by budget, room type, beds needed, and BatStateU Alangilan distance.</p></div>
+    <div class="step"><b>2</b><h3>Apply &amp; Reserve</h3><p class="muted">Submit your online application, track your reference number, and lock in your assigned bed.</p></div>
+    <div class="step"><b>3</b><h3>Sign &amp; Move In</h3><p class="muted">Complete the room checklist, settle your deposit, and access your resident portal.</p></div>
   </div>
 </div></section>
 
@@ -63,6 +67,14 @@
     <a class="btn ghost" href="/rentals.html">Leave a review on a property →</a>
   </div>
   <div class="review-cards" id="latestReviews"><div class="empty">Loading reviews…</div></div>
+</div></section>
+
+<section class="section alt"><div class="container">
+  <div class="section-head">
+    <div><h2 style="margin-bottom:4px">Resident Testimonials</h2><p class="sub" style="margin:0">Stories from BatStateU students, reviewees, and professionals living in Alangilan.</p></div>
+    <a class="btn ghost" href="/contact.html#viewing">Book an ocular viewing →</a>
+  </div>
+  <div class="review-cards" id="testimonialsMount"><div class="empty">Loading testimonials…</div></div>
 </div></section>
 
 <div id="site-footer"></div>
