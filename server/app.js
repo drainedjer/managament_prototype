@@ -12,7 +12,6 @@ const helmet = require('helmet');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
-const { put } = require('@vercel/blob');
 
 const db = require('./db');
 const V = require('./validate');
@@ -28,16 +27,22 @@ const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const SESSION_COOKIE = 'cb_session';
 const CSRF_COOKIE = 'cb_csrf';
 
-// Enforce JWT_SECRET in production/Vercel; use an ephemeral random key in local dev/test if unset.
+// Enforce JWT_SECRET in production/Vercel on auth operations without crashing serverless startup on public routes.
 let resolvedJwtSecret = process.env.JWT_SECRET || '';
-if (!resolvedJwtSecret) {
-  if (IS_PROD || process.env.ENFORCE_JWT_SECRET === 'true') {
-    throw new Error('JWT_SECRET environment variable is required in production/Vercel.');
-  }
+if (!resolvedJwtSecret && !IS_PROD && process.env.ENFORCE_JWT_SECRET !== 'true') {
   resolvedJwtSecret = crypto.randomBytes(32).toString('hex');
   console.warn('[auth] JWT_SECRET not set — using ephemeral in-memory secret for local dev/test.');
 }
 const getJwtSecret = () => process.env.JWT_SECRET || resolvedJwtSecret;
+const requireJwtSecret = () => {
+  const s = getJwtSecret();
+  if (!s) {
+    const err = new Error('JWT_SECRET environment variable is not configured in Vercel.');
+    err.statusCode = 503;
+    throw err;
+  }
+  return s;
+};
 
 // ---------- security headers & CORS ----------
 const IS_VERCEL = !!process.env.VERCEL;
@@ -202,9 +207,10 @@ function readAuthToken(req) {
 
 async function attachOptionalUser(req, res, next) {
   const token = readAuthToken(req);
-  if (!token) return next();
+  const secret = getJwtSecret();
+  if (!token || !secret) return next();
   try {
-    const payload = jwt.verify(token, getJwtSecret());
+    const payload = jwt.verify(token, secret);
     const user = await db.findUserById(payload.id);
     if (user && user.isActive) {
       req.user = user;
@@ -219,8 +225,10 @@ async function attachOptionalUser(req, res, next) {
 async function requireAuth(req, res, next) {
   const token = readAuthToken(req);
   if (!token) return res.status(401).json({ error: 'Authentication required.' });
+  const secret = getJwtSecret();
+  if (!secret) return res.status(503).json({ error: 'JWT_SECRET environment variable is not configured in Vercel.' });
   try {
-    const payload = jwt.verify(token, getJwtSecret());
+    const payload = jwt.verify(token, secret);
     const user = await db.findUserById(payload.id);
     if (!user || !user.isActive) return res.status(401).json({ error: 'Session is no longer valid.' });
     req.user = user;
@@ -350,7 +358,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // ============================================================
 app.get('/api/health', wrap(async (req, res) => {
   const h = await db.healthCheck();
-  res.status(h.ok ? 200 : 503).json(h);
+  res.status(h.ok ? 200 : 503).json({ ...h, jwtConfigured: Boolean(getJwtSecret()) });
 }));
 
 app.get('/api/auth/csrf', (req, res) => {
@@ -397,7 +405,7 @@ app.post('/api/auth/login', authLimiter, wrap(async (req, res) => {
 
   await db.clearFailedLogins(user.id);
   const ownerId = await db.getOwnerIdForUser(user);
-  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, getJwtSecret(), { expiresIn: '8h' });
+  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, requireJwtSecret(), { expiresIn: '8h' });
   setSessionCookie(req, res, token);
   const csrfToken = ensureCsrfCookie(req, res);
 
@@ -430,7 +438,7 @@ app.post('/api/auth/register', authLimiter, wrap(async (req, res) => {
     consentAccepted: true,
   });
 
-  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, getJwtSecret(), { expiresIn: '8h' });
+  const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, requireJwtSecret(), { expiresIn: '8h' });
   setSessionCookie(req, res, token);
   const csrfToken = ensureCsrfCookie(req, res);
   await db.logAudit({
@@ -755,6 +763,7 @@ app.post('/api/uploads/image', requireOwner, wrap(async (req, res) => {
       error: 'Vercel Blob upload is not configured (set BLOB_READ_WRITE_TOKEN) or enter an /images/... path.',
     });
   }
+  const { put } = require('@vercel/blob');
   const filename = `properties/${crypto.randomUUID()}.${sig.ext}`;
   const blob = await put(filename, buf, {
     access: 'public',
@@ -1413,7 +1422,11 @@ app.use((err, req, res, _next) => {
   if (err && err.type === 'entity.too.large') {
     return res.status(413).json({ error: 'Request payload is too large (max 4 MB).' });
   }
-  console.error('[server error]', err?.message || err);
+  if (err && err.statusCode === 503) {
+    console.error('[config error]', err.message);
+    return res.status(503).json({ error: err.message });
+  }
+  console.error('[server error]', err?.code || '', err?.message || err);
   res.status(500).json({ error: 'An unexpected server error occurred.' });
 });
 

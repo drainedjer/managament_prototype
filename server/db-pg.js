@@ -7,14 +7,29 @@ const path = require('path');
 const { Pool } = require('pg');
 const { manilaToday, manilaNowIso, addDays, addMonths, daysBetween } = require('./time');
 
+function getConnectionString() {
+  return (
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.NEON_DATABASE_URL ||
+    process.env.DATABASE_URL_UNPOOLED ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    ''
+  ).trim();
+}
+
 function getPool() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is required.');
+  const connStr = getConnectionString();
+  if (!connStr) {
+    const err = new Error('DATABASE_URL / POSTGRES_URL environment variable is required.');
+    err.statusCode = 503;
+    throw err;
   }
   if (!globalThis.__cbPool) {
-    const isLocal = process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1');
+    const isLocal = connStr.includes('localhost') || connStr.includes('127.0.0.1');
     globalThis.__cbPool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: connStr,
       max: 5,
       idleTimeoutMillis: 20000,
       connectionTimeoutMillis: 10000,
@@ -40,20 +55,27 @@ async function ensureBootstrapped() {
 
       const client = await pool.connect();
       try {
-        await client.query(`SELECT pg_advisory_lock(948271)`);
+        await client.query('BEGIN');
+        await client.query(`SELECT pg_advisory_xact_lock(948271)`);
         const rechk = await client.query(`SELECT to_regclass('public.users') IS NOT NULL AS ready`);
         if (!rechk.rows[0]?.ready) {
           const schemaSql = fs.readFileSync(schemaPath, 'utf8');
           await client.query(schemaSql);
           if (fs.existsSync(seedPath)) {
-            const seedSql = fs.readFileSync(seedPath, 'utf8');
+            const seedSql = fs
+              .readFileSync(seedPath, 'utf8')
+              .replace(/^\s*BEGIN\s*;\s*/im, '')
+              .replace(/\s*COMMIT\s*;\s*$/im, '');
             await client.query(seedSql);
           }
           console.log('[db-pg] Initialized schema and seed data on virgin Postgres database.');
         }
+        await client.query('COMMIT');
         globalThis.__cbSchemaBootstrapped = true;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
-        await client.query(`SELECT pg_advisory_unlock(948271)`).catch(() => {});
         client.release();
       }
     })().catch((err) => {
